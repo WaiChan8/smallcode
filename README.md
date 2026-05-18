@@ -118,11 +118,11 @@ Any OpenAI-compatible endpoint works. Tested and rated with SmallCode's harness:
 
 | Model | Size | Context | Tool Calling | Rating |
 |-------|------|---------|--------------|--------|
-| Gemma 4 E4B (MoE) | 8B/4B active | 32k | ✅ Native | ⭐⭐⭐⭐⭐ |
-| Qwen 3.6-8B | 8B | 128k | ✅ Native | ⭐⭐⭐⭐⭐ |
+| Gemma 4 E4B (MoE) | 8B/4B active | 256k | ✅ Native | ⭐⭐⭐⭐⭐ |
+| Qwen 3.5-8B | 8B | 128k | ✅ Native | ⭐⭐⭐⭐⭐ |
 | Devstral Small | 14B | 128k | ✅ Native | ⭐⭐⭐⭐⭐ |
 | Qwen 3.5-14B | 14B | 128k | ✅ Native | ⭐⭐⭐⭐⭐ |
-| Gemma 4 27B (MoE) | 27B/4B active | 128k | ✅ Native | ⭐⭐⭐⭐⭐ |
+| Gemma 4 27B (MoE) | 27B/4B active | 256k | ✅ Native | ⭐⭐⭐⭐⭐ |
 | Llama 4 Scout | 17B active | 512k | ✅ Native | ⭐⭐⭐⭐ |
 | Mistral Small 3.2 | 24B | 128k | ✅ Native | ⭐⭐⭐⭐ |
 | Phi-4 Mini | 3.8B | 128k | ✅ Native | ⭐⭐⭐ |
