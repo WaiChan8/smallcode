@@ -18,6 +18,20 @@ SmallCode is a terminal-native coding agent designed from the ground up to extra
 ## Quick Start
 
 ```bash
+# Install globally
+npm install -g smallcode
+
+# Or run directly with npx
+npx smallcode
+
+# Start in your project directory
+cd my-project
+smallcode
+```
+
+SmallCode includes [BoneScript](https://github.com/Doorman11991/BoneScript) and [budget-aware-mcp](https://github.com/Doorman11991/budget-aware-mcp) as dependencies — everything installs in one go.
+
+```bash
 # Install MarrowScript compiler
 npm install -g marrowscript-compiler
 
