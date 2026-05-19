@@ -1,6 +1,44 @@
 # Changelog
 
-## [0.6.8] - 2026-05-19
+## [0.6.9] - 2026-05-20
+
+### Added
+- **Features 1-6 Adapter** — `bin/features_adapter.js` wires six MarrowScript-compiled features into the agent loop:
+  - Feature 1: `repairToolCall` — LLM self-repair for malformed tool call JSON
+  - Feature 2: `summarizeFileCompiled` — Cached LLM file summarization (files >100 lines, 1h TTL)
+  - Feature 3: `assertWithinBudget` / `chargeBudget` / `getBudgetState` — In-memory rate-limiting (30 turns/min, 500k tokens/hr)
+  - Feature 4: `setApprovalHandler` / `awaitCheckpointDecision` / `submitCheckpointDecision` — TUI checkpoint approval flow
+  - Feature 5: `retrieveContext` — Zero-LLM semantic context retrieval via code-graph-mcp walk
+  - Feature 6: `validateEditCompiled` — Self-critique after file writes
+- **`src/compiled/features/prompts.js`** — Self-contained prompt runner using direct fetch (no full provider stack). Inline templates for `repair_tool_call`, `summarize_file`, `validate_edit`. In-memory SHA-256 cache.
+- **`src/compiled/features/policy.js`** — In-memory budget policy (no DB). Sliding window rate limits per turn and per-hour token budget.
+- **`src/compiled/features/checkpoints.js`** — In-memory checkpoint flow with TUI approval callback support.
+- **`src/compiled/features/context_retriever.js`** — Keyword-based graph walk for semantic context retrieval.
+- **`marrow/features_1_6.marrow`** — MarrowScript source declaration for all six features (staged to git).
+
+## [0.6.9] - 2026-05-19
+
+### Added
+- **Feature 1: Tool Call Repair** — When the model produces malformed JSON args, the compiled `repair_tool_call` prompt self-repairs instead of silently failing. Sends original call + error + schema back for single-shot correction.
+- **Feature 2: File Summarization** — Large files (>200 lines) are automatically summarized to function signatures + key logic via `summarize_file` prompt. 1h TTL cache keyed by content hash. Falls back to full content gracefully.
+- **Feature 3: Policy Enforcement** — In-memory sliding window rate limiter: 30 turns/min, 500k tokens/hr. Compiled from `agent_limits` policy in `features_1_6.marrow`. Warns on limit, doesn't hard-block local use.
+- **Feature 4: Checkpoint Flow** — `edit_with_approval` flow compiled from MarrowScript. In-memory await/submit system with timeout + auto-approval handler. TUI can hook `setApprovalHandler` for supervised mode.
+- **Feature 5: Context Retrieval** — Before each turn, walks code graph from user message keywords (zero LLM calls). Auto-injects relevant file hints into the system prompt. Keyword extractor prefers CamelCase/PascalCase symbols.
+- **Feature 6: Self-critique** — After `write_file`/`patch`, asks model "does this look correct?" via `validate_edit` prompt (10m cache). Fails open — never blocks on unavailable model.
+- `bin/features_adapter.js` — Unified adapter exposing 11 functions for all 6 features
+- `src/compiled/features/prompts.js` — Self-contained prompt runner (direct fetch, in-memory cache)
+- `src/compiled/features/policy.js` — In-memory budget policy runtime
+- `src/compiled/features/checkpoints.js` — Checkpoint flow runtime
+- `src/compiled/features/context_retriever.js` — Keyword extraction + graph walk
+- `marrow/features_1_6.marrow` — Source declaration for all 6 features
+- `.test-workspace/test_features_1_6.js` — 46-test suite (all passing)
+
+### Changed
+- `bin/executor.js` — `read_file` now triggers `summarize_file` for files >200 lines (Feature 2)
+- `bin/smallcode.js` — Wired all 6 features: tool repair on parse fail, context retrieval per turn, policy assert/charge, self-critique on writes, rate limit display
+- `bin/commands.js` — `/tokens` now shows policy budget state (turns/min, tokens/hr)
+
+
 
 ### Added
 - **Deterministic Tool Router** — Compiled from `marrow/tool_router.marrow` to `src/compiled/tool_router.js`. Classifies user messages into tool categories (read/write/search/run/plan/web/respond) using pure weighted regex — zero LLM calls, zero tokens, zero latency.

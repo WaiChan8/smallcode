@@ -32,6 +32,21 @@ async function executeTool(name, args, ctx) {
       const end = args.end_line || lines.length;
       const slice = lines.slice(start, end);
       const numbered = slice.map((l, i) => `${String(start + i + 1).padStart(4)}│ ${l}`).join('\n');
+
+      // Feature 2: summarize large files (>200 lines, no line range requested)
+      // This saves context by replacing the full file with signatures + key logic
+      if (lines.length > 200 && !args.start_line && !args.end_line) {
+        try {
+          const { summarizeFileCompiled } = require('./features_adapter');
+          if (summarizeFileCompiled) {
+            const summary = await summarizeFileCompiled(args.path, content, 600);
+            if (summary && summary.length > 50) {
+              return { result: `${args.path} (${lines.length} lines — summarized):\n${summary}` };
+            }
+          }
+        } catch {} // fall through to full content on any error
+      }
+
       return { result: `${args.path} (${lines.length} lines):\n${numbered}` };
     }
 

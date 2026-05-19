@@ -92,6 +92,16 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
           console.log(chalk.gray('  Token monitor not initialized.'));
         } else {
           console.log(chalk.bold('  ' + tokenMonitor.formatFull().split('\n').join('\n  ')));
+          // Feature 3: show policy budget state
+          try {
+            const { getBudgetState } = require('./features_adapter');
+            if (getBudgetState) {
+              const bs = getBudgetState();
+              if (bs) {
+                console.log(`  Policy:    turns ${bs.run_turn.calls}/30 this min | tokens ${Math.round(bs.per_user_tokens.tokens/1000)}k/500k this hr`);
+              }
+            }
+          } catch {}
         }
         console.log('');
         rl.prompt();
