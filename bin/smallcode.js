@@ -103,7 +103,7 @@ let tokenTracker = null;
 // Fullscreen TUI reference for streaming (set when fullscreen mode is active)
 let _fullscreenRef = null;
 
-const VERSION = '0.6.5';
+const VERSION = '0.6.6';
 const LOGO = `
   ⚡ SmallCode v${VERSION}
   AI coding agent for small LLMs
@@ -912,13 +912,14 @@ Read the FULL file above carefully. Fix ALL errors. Use the patch tool with the 
       } else {
         process.stdout.write(tui.renderMarkdown(message.content));
       }
-    } else if (!message.tool_calls || message.tool_calls.length === 0) {
-      // No content AND no tool calls — try streaming for the response
+    } else if (toolCallsThisTurn === 0 && (!message.tool_calls || message.tool_calls.length === 0)) {
+      // No content AND no tool calls AND no tools were called this turn — try streaming
       const streamedContent = await streamFinalResponse(config, conversationHistory);
       if (streamedContent) {
         conversationHistory.push({ role: 'assistant', content: streamedContent });
       }
     }
+    // If tools were called but model returned empty content, that's fine — task is done.
     break;
   }
 
@@ -1245,6 +1246,9 @@ async function streamFinalResponse(config, messages) {
       headers['X-Title'] = 'SmallCode';
     }
 
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30000); // 30s timeout for summary
+
     const response = await fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
       headers,
@@ -1255,7 +1259,9 @@ async function streamFinalResponse(config, messages) {
         temperature: 0.1,
         max_tokens: 256,
       }),
+      signal: controller.signal,
     });
+    clearTimeout(timeout);
 
     if (!response.ok) return null;
 
