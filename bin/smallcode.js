@@ -530,11 +530,16 @@ async function runAgentLoop(userMessage, config) {
           console.log(tui.toolSuccess('', toolMs));
         }
 
-        // Add tool result to history
+        // Add tool result to history (cap at 8k chars to prevent context explosion)
+        const toolContent = result.result || result.error || '';
+        const maxToolResultChars = (config.context?.detected_window || 32000) < 64000 ? 6000 : 12000;
+        const cappedContent = toolContent.length > maxToolResultChars
+          ? toolContent.slice(0, maxToolResultChars - 200) + '\n\n...(truncated, ' + toolContent.length + ' chars total)...\n' + toolContent.slice(-200)
+          : toolContent;
         conversationHistory.push({
           role: 'tool',
           tool_call_id: tc.id,
-          content: result.result || result.error || '',
+          content: cappedContent,
         });
 
         // ── IMPROVEMENT LOOP: auto-validate writes and feed errors back ──
@@ -969,6 +974,32 @@ function runValidation(filePath) {
   }
 }
 
+// Build a compact system prompt — only includes sections relevant to the task type
+function buildCompactSystemPrompt(taskType, messages) {
+  const os = process.platform === 'win32' ? 'Windows' : process.platform === 'darwin' ? 'macOS' : 'Linux';
+  const osHint = process.platform === 'win32' ? '\nUse "dir" not "ls", "type" not "cat". No bash-only commands.' : '';
+
+  let prompt = `You are SmallCode, a coding agent. Working directory: ${process.cwd()}
+OS: ${os}${osHint}
+
+Rules: Use patch for edits (not full rewrites). Prefer compound tools. Be concise. ACT immediately — do not ask for confirmation unless the task is genuinely ambiguous. If asked to read a file, read it. If asked to create something, create it.`;
+
+  // Only add tool-use instructions for tasks that need tools
+  if (taskType !== 'explanation') {
+    prompt += `\nUse graph_search/explain_symbol for "how does X work" questions. Use list_projects for workspace overview.`;
+  }
+
+  // Only add BoneScript for backend tasks
+  if (taskType === 'backend') {
+    prompt += `\n\nFor Node.js backends: write a .bone file → bone_check → bone_compile. Don't hand-write routes.`;
+  }
+
+  // Add memory/skills/plugins (already compact)
+  prompt += getMemoryContext(messages) + getSkillContext(messages) + getPluginPrompts();
+
+  return prompt;
+}
+
 // Auto-load relevant memory for the current task (injected into system prompt)
 function getMemoryContext(messages) {
   try {
@@ -1014,72 +1045,7 @@ async function chatCompletion(config, messages) {
   const baseUrl = config.model.baseUrl;
   const systemMsg = {
     role: 'system',
-    content: `You are SmallCode, a coding assistant that operates in the user's project directory.
-
-You have tools to read, write, and edit files, run shell commands, and search code.
-You also have project memory and compound tools that do multiple operations in one call.
-You have a CODE GRAPH indexed for this project — use it for understanding questions.
-
-IMPORTANT — Code Graph (use these FIRST for understanding/analysis questions):
-- list_projects: Lists ALL projects in the workspace with stats (files, symbols, LOC, languages). Use FIRST when asked "what projects are here" or "tell me about the codebase".
-- graph_search: Search for a specific symbol/function/class in the graph. Use for "how does X work" or "find the auth logic". NOT for listing projects.
-- explain_symbol: Get full explanation of a function/class — signature, location, callers, callees, and architecture context.
-- memory_load: Load relevant project memory (past decisions, conventions, gotchas).
-
-When the user asks about the codebase, architecture, or "how does X work":
-1. For "what projects" / "describe the workspace" → use list_projects
-2. For "how does function X work" → use graph_search or explain_symbol
-3. THEN read specific files only if you need more detail
-4. Do NOT manually read every file — the graph has the relationships already indexed
-5. For multi-project workspaces: the graph indexes ALL sub-projects. Search broadly.
-
-IMPORTANT — Environment:
-- OS: Windows (cmd.exe shell)
-- Use "dir" not "ls", "type" not "cat", "del" not "rm", "mkdir" not "mkdir -p"
-- Use backslashes in paths or forward slashes (both work)
-- Do NOT use bash-specific commands (touch, export, chmod)
-
-Rules:
-- PREFER compound tools to reduce back-and-forth: use read_and_patch instead of read_file then patch, use find_and_read instead of find_files then read_file, use create_and_run instead of write_file then bash.
-- Use the "patch" or "read_and_patch" tool for edits. Do NOT rewrite whole files.
-- Be concise — show what you did, not lengthy explanations.
-- If a task has multiple steps, use compound tools to minimize calls.
-- When you're done, say what you accomplished in 1-2 sentences.
-- If a tool fails, explain what went wrong and what you tried. Do NOT ignore errors and output a generic greeting.
-- NEVER output a greeting or "how can I help" message in the middle of a task. Stay focused on the current work.
-- Create files with write_file directly. Do NOT run mkdir first — write_file creates directories automatically.
-- Do NOT delete and recreate files to fix errors. Use the patch tool to fix the specific broken lines.
-${currentTaskType === 'backend' ? `
-BONESCRIPT MODE — For Node.js/TypeScript backends, use BoneScript:
-1. Write a .bone file (declarative syntax — entities, capabilities, events, policies)
-2. Validate with bone_check tool
-3. Compile with bone_compile tool → generates ENTIRE project (routes, auth, DB, events, migrations, SDK, admin panel)
-
-Do NOT hand-write Express routes, Prisma schemas, or JWT auth. Use BoneScript instead.
-
-BoneScript syntax:
-system MyApp {
-  entity User {
-    owns: [name: string, email: string, role: string]
-    constraints: [email.unique, name.length in 1..100]
-    states: active -> suspended -> deleted
-    auth: jwt
-  }
-  capability register(user: User) {
-    requires: [user.email.unique]
-    effects: [user.state = active]
-    emits: UserRegistered
-    sync: transactional
-  }
-  event UserRegistered {
-    payload: { user_id: uuid, email: string }
-    delivery: exactly_once
-  }
-  policy api { rate_limit: 100 per 1m, audit: true }
-}
-` : ''}
-Working directory: ${process.cwd()}
-${getMemoryContext(messages)}${getSkillContext(messages)}${getPluginPrompts()}`
+    content: buildCompactSystemPrompt(currentTaskType, messages),
   };
 
   try {
