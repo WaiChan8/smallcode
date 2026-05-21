@@ -67,7 +67,7 @@ LAUNCHER="${INSTALL_DIR}/smallcode"
 cat > "${LAUNCHER}" << 'LAUNCHER_EOF'
 #!/bin/sh
 # smallcode wrapper — resolves bundled node_modules automatically
-SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$(realpath "$0")")" && pwd)"
 NODE_PATH="${SCRIPT_DIR}/node_modules" exec node "${SCRIPT_DIR}/bin/smallcode.js" "$@"
 LAUNCHER_EOF
 chmod +x "${LAUNCHER}"
