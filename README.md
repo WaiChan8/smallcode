@@ -6,15 +6,17 @@
 
 [![npm](https://img.shields.io/npm/v/smallcode)](https://www.npmjs.com/package/smallcode)
 
-**AI coding agent optimized for small LLMs (≤20B parameters)**
+**AI coding agent optimized for small LLMs (8B-35B parameters)**
 
-SmallCode is a terminal-native coding agent designed from the ground up to extract useful work from local models (7B-20B) running on consumer hardware. While tools like OpenCode assume frontier models with 128k+ context and perfect tool calling, SmallCode compensates for the limitations of small models through intelligent architecture.
+SmallCode is a terminal-native coding agent designed from the ground up to extract useful work from local models (8B-35B) running on consumer hardware. While tools like OpenCode assume frontier models with 128k+ context and perfect tool calling, SmallCode compensates for the limitations of small models through intelligent architecture.
+
+> **Recommended model size: 8B-35B parameters.** Smaller models (≤4B) struggle with multi-step tool use and lose context across turns. Larger models (>35B) don't need SmallCode's adaptations and are better served by tools designed for frontier models.
 
 ## Why SmallCode?
 
 | | OpenCode | SmallCode |
 |---|----------|-----------|
-| **Target** | Frontier models (Claude, GPT-5) | 7B-20B local models |
+| **Target** | Frontier models (Claude, GPT-5) | 8B-35B local models |
 | **Context** | Dumps everything | Budget-managed, summarized |
 | **Tool calling** | Assumes reliable JSON | Forgiving multi-format parser |
 | **Planning** | Single-shot | TODO-file decomposed steps |
@@ -41,8 +43,8 @@ Pre-compiled tarballs for Windows, macOS, and Linux are built on every release �
 
 | Platform | One‑line install |
 |---|---|
-| Linux / macOS | `bash <(curl -fsSL https://raw.githubusercontent.com/Doorman11991/smallcode/master/install.sh)` |
-| Windows | `iwr -Uri https://raw.githubusercontent.com/Doorman11991/smallcode/master/install.ps1 -UseBasicParsing \| iex` |
+| Linux / macOS | `bash <(curl -fsSL https://raw.githubusercontent.com/Doorman11991/smallcode/main/install.sh)` |
+| Windows | `iwr -Uri https://raw.githubusercontent.com/Doorman11991/smallcode/main/install.ps1 -UseBasicParsing \| iex` |
 
 The install script downloads the correct tarball for your platform, extracts it to `~/.smallcode`, and adds it to your PATH. Run `smallcode --help` to verify.
 
@@ -77,12 +79,6 @@ SMALLCODE_BASE_URL=http://localhost:1234/v1
 # DEEPSEEK_API_KEY=sk-...
 ```
 
-You can override the endpoint for one run with:
-
-```bash
-smallcode --endpoint http://localhost:1234/v1 --model your-model-name
-```
-
 See `.env.example` for all options. Also supports `smallcode.toml` for backwards compatibility.
 
 ## Architecture
@@ -105,7 +101,6 @@ bin/
 
 src/
 ├── api/index.js        Programmatic API (require('smallcode'))
-├── security/sanitize.js Centralized redaction, path safety, shell escaping
 ├── tui/fullscreen.js   Fullscreen alternate-buffer TUI
 ├── plugins/loader.js   Plugin system
 ├── plugins/skills.js   Skill system
@@ -114,31 +109,6 @@ src/
 ├── model/              Multi-model profiles + routing
 └── session/            Persistence, undo, sharing, references
 ```
-
-## Security & Context-Leak Hardening
-
-SmallCode runs untrusted-ish input — model output, MCP server output, tool
-results, web pages — back into a context window. The `src/security/sanitize.js`
-module is the single chokepoint for keeping that traffic safe:
-
-- **Secret redaction** before disk persistence and before injection into the
-  model context. Patterns cover OpenAI/Anthropic/GitHub/Google/AWS keys, JWTs,
-  bearer tokens, env-style `KEY=value`, and PEM private key blocks. Sessions,
-  traces, and shared exports all flow through it.
-- **Path containment** — `@file` references, image attachments, and every
-  file-touching tool refuse traversal (`../`), absolute paths, and sensitive
-  paths (`.ssh/`, `.aws/credentials`, `/etc/shadow`, etc.).
-- **Shell escaping** — All tool-built commands use `escapeShellArg` /
-  `execFileSync` with arg arrays. Model-supplied patterns and paths can no
-  longer escape `"…"` interpolation.
-- **SSRF guard** — Endpoint allowlist matches by `URL.origin`, not naive
-  `startsWith`. Cloud metadata (`169.254.169.254`, `metadata.google.internal`),
-  link-local (`169.254/16`), and CGNAT (`100.64/10`) are always blocked,
-  even when `LLM_ALLOW_PUBLIC_ENDPOINTS=1`. `web_fetch` uses
-  `redirect: 'manual'` so a 30x can't bypass the guard.
-- **MCP env scrubbing** — Spawned MCP servers don't inherit
-  `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `AWS_SECRET_ACCESS_KEY` etc.
-  unless the server's config explicitly re-exports them.
 
 ## Key Features
 
@@ -196,6 +166,51 @@ Per-model configuration: context length, tool format (native/hermes/json/xml/tex
 
 ### Working Memory
 Persistent scratchpad that survives across turns. Compensates for limited reasoning depth — the model can write notes to itself.
+
+### Persistent Shell Sessions
+`bash` calls share a long-lived shell process so `cd`, env vars, and shell variables persist across calls. Without this, every bash call is a fresh process, breaking multi-step tasks like "cd src then run pytest". Optional cwd-containment refuses any `cd` (or `pushd`/`chdir`/sub-shell escape) that would leave the project root. Disable with `SMALLCODE_SHELL_PERSIST=false`.
+
+### Thinking Budget Control
+Modern reasoning models (Qwen3, DeepSeek R1, GPT-5 reasoning) can spend thousands of tokens "thinking" about trivial tasks. SmallCode caps thinking budget per call (Anthropic `budget_tokens`, OpenAI `reasoning_effort`, Qwen `enable_thinking`, DeepSeek style — all set defensively) and hard-truncates oversize thinking blocks before they enter conversation history. Configure with `SMALLCODE_THINKING_BUDGET=2000` (default), or `SMALLCODE_THINKING_DISABLE=true` to turn off entirely.
+
+### Knowledge Injection
+Drop short reference notes into a `knowledge/` directory and the most relevant ones get injected into the system prompt based on keyword overlap with your message. Designed for small models that benefit from algorithm cheat sheets or syntax reminders inline. See `knowledge/README.md` for the format. Configurable budget (default 1500 tokens) via `SMALLCODE_KNOWLEDGE_MAX_TOKENS`.
+
+### Read-Before-Write Guard
+Tracks which paths the model has read this session. First `write_file` to an existing unread file is refused with a hint to `read_file` first; second attempt allowed (so legitimate full-replace intents succeed). New files always permitted. `patch` counts as a read. Disable with `SMALLCODE_WRITE_GUARD=false`.
+
+### Tool-Call Deduplication
+Identical pure-tool calls within a sliding window are short-circuited with a cached result instead of re-executing. Only applies to read-only tools (`read_file`, `search`, `graph_search`, etc.) — never to anything with side effects. Saves both context and latency on small models that loop. Disable with `SMALLCODE_DEDUP=false`.
+
+### Evidence Store
+Automated capture of "what was tried, what worked, what failed" per task. Stored as searchable memory objects in the existing memory MCP module so they flow through FTS5 + staleness-decay loading on future tasks rather than always hogging context. The model learns from past sessions: it sees that `pip install` failed last time on this Python version, or that `npm test` hangs without `--run`. Disable with `SMALLCODE_EVIDENCE_DISABLE=true`.
+
+### Plan-Then-Execute Mode
+For multi-step tasks (refactors, multi-file features, multi-imperative prompts), SmallCode asks the model to emit a numbered plan FIRST, then re-injects that plan as an anchor on subsequent turns. Reduces drift on long traces — the model can't "forget" step 3 by the time it finishes step 1. Heuristic-based — simple tasks like "create hello.py" don't trigger planning. Configure with `SMALLCODE_PLAN=true|false`.
+
+### Snapshot & Auto-Rollback
+Before each agent turn, SmallCode opens a file snapshot checkpoint. Every `write_file` and `patch` records its pre-edit content. If validation hard-fails and all retries are exhausted, set `SMALLCODE_SNAPSHOT_AUTO_ROLLBACK=true` to automatically revert all edits in the turn back to the checkpoint state. All snapshots persisted to `.smallcode/snapshots/` for manual audit. Disable with `SMALLCODE_SNAPSHOT=false`.
+
+### Test-Runner Auto-Discovery
+Detects your project's test command from config files (package.json, pytest.ini, pyproject.toml, Cargo.toml, go.mod, pom.xml, etc.) and injects it into the system prompt once. The model knows how to run tests without wasting tool calls on discovery. Also surfaces in AUTO-VALIDATE fix prompts. Override with `SMALLCODE_TEST_RUNNER=<cmd>` or disable with `SMALLCODE_TEST_DISABLE=true`.
+
+### Bootstrap Detection
+On first turn, scans the workspace and injects a compact project summary: runtime + version, package manager, framework (Next.js/FastAPI/Express/Django/React/Vue/…), entry point, and build/test/run commands. Covers Node, Python, Rust, Go, .NET, Java, Ruby. Eliminates the 3-5 tool calls small models usually spend figuring out what kind of project they're in. Disable with `SMALLCODE_BOOTSTRAP=false`.
+
+### Adaptive Retry Temperature
+When the improvement loop retries a failed edit, each attempt uses a different temperature so it doesn't produce the same broken output three times. Attempt 1 lowers temperature (deterministic fix), attempt 2 raises it (explore alternatives), attempt 3 returns to base. Delta defaults to 0.15. Disable with `SMALLCODE_TEMP_ADAPT=false`.
+
+### Per-Tool Trust Score Decay
+Tracks consecutive failures per tool within a session. Tools that fail 3+ times in a row are soft-demoted (schema list back). Tools that fail 5+ times are dropped from the schema entirely for the session. Prevents the model from looping on a broken MCP server or a search that keeps returning nothing. Resets between runs. Disable with `SMALLCODE_TRUST_DECAY=false`.
+
+### Benchmark Harness
+Run the included benchmark suite against any local model to measure pass rate across small coding tasks. Three suites: `smoke` (5 trivial tasks, ~30s), `polyglot-mini` (19 tasks across Python/JS/TS/Bash/Markdown/JSON), `tool-use` (10 multi-step tool sequencing tasks). Results persisted to `.smallcode/benchmarks/`.
+
+```bash
+npm run bench:smoke
+npm run bench:polyglot
+npm run bench:tools
+```
 
 
 ## Commands

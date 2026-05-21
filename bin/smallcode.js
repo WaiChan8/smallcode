@@ -226,6 +226,14 @@ async function checkOllama(config) {
 
 // Conversation history for multi-turn
 const conversationHistory = [];
+
+// Plan tracker — Feature 8 plan-then-execute. Lazy-instantiated per agent run.
+let _planTracker = null;
+// Per-run detectors (Features 4, 10-11): re-built each runAgentLoop call
+// bound to process.cwd() so bench tasks in temp dirs get correct context.
+let _bootstrapDetector = null;
+let _testRunnerDetector = null;
+let _knowledgeLoader = null;
 const improvementAttempts = {}; // filePath → attempt count
 
 async function runTUI(config) {
@@ -387,9 +395,19 @@ function showMiniDiff(filePath, oldStr, newStr, lineNum) {
   if (diff) console.log(diff);
 }
 
-// Execute a tool call — delegates to executor.js module
+// Execute a tool call — delegates to executor.js module.
+// Wrapped with dedup (Feature 6): identical pure-tool calls within the recent
+// window are short-circuited with a cached result. Disable with SMALLCODE_DEDUP=false.
 async function executeTool(name, args) {
-  return _executeToolModule(name, args, {
+  let dedup = null;
+  try {
+    const { getDedup, ToolDedup } = require('../src/tools/dedup');
+    dedup = getDedup();
+    const cached = dedup.lookup(name, args);
+    if (cached) return ToolDedup.markCached(cached);
+  } catch {}
+
+  const result = await _executeToolModule(name, args, {
     _fullscreenRef,
     mcpCall,
     memoryStore,
@@ -399,13 +417,23 @@ async function executeTool(name, args) {
     config,
     tui,
   });
+
+  try { if (dedup) dedup.record(name, args, result); } catch {}
+  return result;
 }
 
 // ─── COMPOUND TOOLS ──────────────────────────────────────────────────────────
 // Tool definitions + routing loaded from bin/tools.js
-// getAllTools delegates to the module with plugin/mcp context
+// getAllTools delegates to the module with plugin/mcp context.
+// Trust decay (Feature 13): dropped tools filtered from schema list.
 function getAllTools(config, stage2Category) {
-  return _getAllToolsModule(config, stage2Category, { pluginLoader, mcpClient: (typeof mcpClient !== 'undefined' ? mcpClient : null) });
+  const tools = _getAllToolsModule(config, stage2Category, { pluginLoader, mcpClient: (typeof mcpClient !== 'undefined' ? mcpClient : null) });
+  try {
+    const { getTrustDecay } = require('../src/tools/trust_decay');
+    return getTrustDecay().filterAndSort(tools);
+  } catch {
+    return tools;
+  }
 }
 let ALL_TOOLS = [...TOOLS, ...COMPOUND_TOOLS];
 
@@ -496,6 +524,60 @@ async function runAgentLoop(userMessage, config) {
   }
 
   conversationHistory.push({ role: 'user', content: augmented });
+
+  // Open a snapshot checkpoint for this agent run (Feature 9). All
+  // write_file/patch calls during this run will record their pre-edit
+  // state. On clean completion we commit (discard); on hard failure with
+  // SMALLCODE_SNAPSHOT_AUTO_ROLLBACK=true we revert all writes.
+  try {
+    const { getSnapshotManager } = require('../src/session/snapshot');
+    const snap = getSnapshotManager({ workdir: process.cwd() });
+    snap.begin(`turn-${Date.now()}`);
+  } catch {}
+
+  // Plan-then-execute (Feature 8): for multi-step tasks, ask the model for
+  // a numbered plan FIRST, then re-inject it as an anchor on subsequent
+  // turns so it doesn't drift. Heuristic-based — single-shot tasks like
+  // "create hello.py" don't trigger planning.
+  let _planInstructionIdx = -1; // track the one-shot instruction so we can remove it
+  try {
+    const { shouldPlan, PlanTracker } = require('../src/session/plan_tracker');
+    if (!_planTracker) _planTracker = new PlanTracker();
+    _planTracker.reset();
+    if (shouldPlan(userMessage)) {
+      _planTracker.activate();
+      // Append a one-shot instruction asking the model to emit a plan first.
+      // We record the index so we can splice it out after the first response
+      // — it must not persist in history and be re-sent on every subsequent call.
+      _planInstructionIdx = conversationHistory.length;
+      conversationHistory.push({
+        role: 'system',
+        content: PlanTracker.planRequestInstruction(),
+      });
+    }
+  } catch {} // never fail the agent loop on planner errors
+
+  // Initialise per-run detectors (Features 10-11) bound to THIS workdir.
+  // Re-created each run so bench tasks running in temp dirs get correct info.
+  try {
+    const { BootstrapDetector } = require('../src/session/bootstrap');
+    _bootstrapDetector = new BootstrapDetector({ workdir: process.cwd() });
+  } catch { _bootstrapDetector = null; }
+  try {
+    const { TestRunnerDetector } = require('../src/tools/test_runner');
+    _testRunnerDetector = new TestRunnerDetector({ workdir: process.cwd() });
+  } catch { _testRunnerDetector = null; }
+  // Knowledge loader (Feature 4) also per-run so bench tasks get their own workdir.
+  try {
+    const { KnowledgeLoader } = require('../src/knowledge/loader');
+    _knowledgeLoader = new KnowledgeLoader({ rootDir: process.cwd() });
+  } catch { _knowledgeLoader = null; }
+  // Trust decay (Feature 13) resets per agent loop turn so TUI sessions
+  // don't accumulate decay from unrelated prior requests.
+  try {
+    const { getTrustDecay } = require('../src/tools/trust_decay');
+    getTrustDecay().reset();
+  } catch {}
 
   // Governor: classify task type (determines verification strategy)
   // Uses MarrowScript-compiled classifier with regex fallback
@@ -723,6 +805,23 @@ async function runAgentLoop(userMessage, config) {
     const message = response.choices?.[0]?.message;
     if (!message) break;
 
+    // Truncate excessive thinking content before it enters conversation history.
+    // Reasoning models can ignore the soft budget and emit 50KB of thinking
+    // loops. We hard-cap it here so the next turn doesn't include a wall of
+    // <think>...</think>. Pure replacement — content stays a string.
+    if (message.content && typeof message.content === 'string') {
+      try {
+        const { truncateThinking, estimateThinkingTokens } = require('../src/model/thinking_budget');
+        const beforeTokens = estimateThinkingTokens(message.content);
+        message.content = truncateThinking(message.content);
+        const afterTokens = estimateThinkingTokens(message.content);
+        if (beforeTokens > 1000 && _fullscreenRef) {
+          _fullscreenRef.addTool('thinking', afterTokens < beforeTokens ? 'err' : 'ok',
+            `${beforeTokens}t${afterTokens < beforeTokens ? ` → ${afterTokens}t (truncated)` : ''}`);
+        }
+      } catch {}
+    }
+
     // If model wants to call tools
     if (message.tool_calls && message.tool_calls.length > 0) {
       // After first tool call, widen tool set for subsequent iterations.
@@ -741,6 +840,27 @@ async function runAgentLoop(userMessage, config) {
       // However, once a tool_call has been fully processed (tool result received),
       // we'll truncate large args in the stored message during mid-turn eviction.
       conversationHistory.push(message);
+
+      // Plan extraction (Feature 8): if the model emitted a plan in its
+      // textual content, capture it now so subsequent turns can re-inject it.
+      try {
+        if (_planTracker && _planTracker.needsPlan() && message.content) {
+          if (_planTracker.ingestResponse(message.content)) {
+            if (_fullscreenRef) _fullscreenRef.addTool('plan', 'ok', `${_planTracker.plan.length} steps`);
+            // Remove the one-shot instruction now that we have the plan.
+            // It must not persist in history or the model will keep trying
+            // to write a plan on every subsequent chatCompletion call.
+            if (_planInstructionIdx >= 0 && _planInstructionIdx < conversationHistory.length) {
+              const msg = conversationHistory[_planInstructionIdx];
+              if (msg && msg.role === 'system' && typeof msg.content === 'string' &&
+                  msg.content.includes('numbered plan')) {
+                conversationHistory.splice(_planInstructionIdx, 1);
+              }
+              _planInstructionIdx = -1;
+            }
+          }
+        }
+      } catch {}
 
       for (const tc of message.tool_calls) {
         toolCallsThisTurn++;
@@ -786,6 +906,14 @@ async function runAgentLoop(userMessage, config) {
 
         // Record trace step
         traceRecorder.recordToolCall(toolName, toolArgs, result.result || result.error || '', toolMs);
+
+        // Trust decay (Feature 13): track consecutive failures per tool.
+        // Dropped tools are filtered out of the schema list on the next
+        // chatCompletion via getAllTools() → filterAndSort().
+        try {
+          const { getTrustDecay } = require('../src/tools/trust_decay');
+          getTrustDecay().record(toolName, !result.error);
+        } catch {}
 
         // Show result indicators
         if (result.error) {
@@ -865,8 +993,16 @@ async function runAgentLoop(userMessage, config) {
                 : '';
 
               if (attempt <= 2) {
+                // Include the test command if we have one, so the model can verify its own fix
+                let testHint = '';
+                try {
+                  if (_testRunnerDetector) {
+                    const r = _testRunnerDetector.detect();
+                    if (r) testHint = `\n\nAfter fixing, run \`${r.command}\` to verify.`;
+                  }
+                } catch {}
                 fixPrompt = `[AUTO-VALIDATE] Errors in ${filePath} (attempt ${attempt}/${MAX_IMPROVE_ITERATIONS}):
-${validation.errors.join('\n')}${historyStr}
+${validation.errors.join('\n')}${historyStr}${testHint}
 
 Fix these errors. Do NOT repeat the same approach that failed before.`;
               } else {
@@ -953,6 +1089,21 @@ Read the FULL file above carefully. Fix ALL errors. Use the patch tool with the 
                   // Escalation also failed — give up gracefully
                   const errMsg = escalatedResponse?.error || 'No response';
                   console.log(`  \x1b[31m✗ Escalation failed: ${errMsg}\x1b[0m`);
+                  // Auto-rollback (Feature 9, opt-in via SMALLCODE_SNAPSHOT_AUTO_ROLLBACK=true).
+                  // Validation has hard-failed and even the stronger model couldn't fix it
+                  // — better to revert to a known-good state than leave half-broken files.
+                  try {
+                    const { getSnapshotManager } = require('../src/session/snapshot');
+                    const snap = getSnapshotManager();
+                    if (snap.autoRollback && snap.isActive()) {
+                      const r = snap.rollback('escalation+improvement-loop exhausted');
+                      console.log(`  \x1b[33m↶ Auto-rollback: restored ${r.restored}, deleted ${r.deleted}\x1b[0m`);
+                      conversationHistory.push({
+                        role: 'user',
+                        content: `[AUTO-ROLLBACK] All edits in this turn have been reverted because validation kept failing. The workspace is back to its pre-turn state. Re-read files before retrying.`,
+                      });
+                    }
+                  } catch {}
                   conversationHistory.push({
                     role: 'user',
                     content: `[ESCALATION FAILED] Even the stronger model couldn't fix this. Deliver the best version you have and explain what's still broken.`,
@@ -1129,6 +1280,40 @@ Read the FULL file above carefully. Fix ALL errors. Use the patch tool with the 
     // Stream the final response for better UX
     if (message.content) {
       conversationHistory.push({ role: 'assistant', content: message.content });
+
+      // Plan extraction from a tool-less response (model planned without tools)
+      try {
+        if (_planTracker && _planTracker.needsPlan()) {
+          if (_planTracker.ingestResponse(message.content)) {
+            if (_fullscreenRef) _fullscreenRef.addTool('plan', 'ok', `${_planTracker.plan.length} steps`);
+            // Remove the one-shot instruction from history (same as tool-call path)
+            if (_planInstructionIdx >= 0 && _planInstructionIdx < conversationHistory.length) {
+              const msg = conversationHistory[_planInstructionIdx];
+              if (msg && msg.role === 'system' && typeof msg.content === 'string' &&
+                  msg.content.includes('numbered plan')) {
+                conversationHistory.splice(_planInstructionIdx, 1);
+              }
+              _planInstructionIdx = -1;
+            }
+          }
+        }
+      } catch {}
+
+      // Detect "step N done" markers so the plan tracker advances.
+      // Matches: "step 1 done", "step 1: done", "Step 1. complete", "step1 finished".
+      try {
+        if (_planTracker && _planTracker.plan) {
+          const stepDone = (message.content || '').match(/\bstep\s*(\d{1,2})[\s:.\-]+(?:done|complete|completed|finished|✓)\b/gi);
+          if (stepDone) {
+            for (const m of stepDone) {
+              const n = parseInt(m.match(/\d+/)[0], 10);
+              if (n >= 1 && n <= _planTracker.plan.length) {
+                _planTracker.completeStep(n - 1);
+              }
+            }
+          }
+        }
+      } catch {}
       // Render with markdown highlighting
       if (_fullscreenRef) {
         _fullscreenRef.addChat('assistant', message.content);
@@ -1178,8 +1363,25 @@ Read the FULL file above carefully. Fix ALL errors. Use the patch tool with the 
     }
   }
 
-  // Stop trace recording for this turn
-  traceRecorder.stop();
+  // Stop trace recording for this turn — and convert the trace into a
+  // searchable evidence memory so future tasks can learn from what worked
+  // and what failed. Stored as type:'context' tag:'evidence' in the existing
+  // memory MCP module so it doesn't hog the live system prompt.
+  const finishedTrace = traceRecorder.stop();
+  try {
+    if (finishedTrace) {
+      const { recordEvidence } = require('../src/memory/evidence');
+      recordEvidence(memoryStore, finishedTrace);
+    }
+  } catch {} // never fail the agent loop on evidence-storage errors
+
+  // Commit (discard) the snapshot checkpoint — clean run, no rollback needed.
+  // If a hard failure earlier in the loop wanted to roll back, it would have
+  // called rollback() before reaching here; commit() is a no-op in that case.
+  try {
+    const { getSnapshotManager } = require('../src/session/snapshot');
+    getSnapshotManager().commit();
+  } catch {}
 }
 
 // ─── Validation for Improvement Loop ────────────────────────────────────────
@@ -1216,8 +1418,16 @@ function buildCompactSystemPrompt(taskType, messages) {
   const os = process.platform === 'win32' ? 'Windows' : process.platform === 'darwin' ? 'macOS' : 'Linux';
   const osHint = process.platform === 'win32' ? '\nUse "dir" not "ls", "type" not "cat". No bash-only commands.' : '';
 
+  // Bootstrap detection (Feature 11): compact project summary at the top so
+  // the model knows its runtime, build/test commands, and entry point without
+  // burning tool calls on discovery.
+  let bootstrapLine = '';
+  try {
+    if (_bootstrapDetector) bootstrapLine = _bootstrapDetector.formatForPrompt();
+  } catch {}
+
   let prompt = `You are SmallCode, a coding agent. Working directory: ${process.cwd()}
-OS: ${os}${osHint}
+OS: ${os}${osHint}${bootstrapLine}
 
 Rules: Use patch for edits (not full rewrites). Prefer compound tools. Be concise. ACT immediately — do not ask for confirmation unless the task is genuinely ambiguous. If asked to read a file, read it. If asked to create something, create it.`;
 
@@ -1232,9 +1442,44 @@ Rules: Use patch for edits (not full rewrites). Prefer compound tools. Be concis
   }
 
   // Add memory/skills/plugins (already compact)
-  prompt += getMemoryContext(messages) + getSkillContext(messages) + getPluginPrompts();
+  prompt += getMemoryContext(messages) + getSkillContext(messages) + getPluginPrompts() + getKnowledgeContext(messages) + getActivePlanContext() + getTestRunnerContext();
 
   return prompt;
+}
+
+// Test runner context (Feature 10): inject the detected test command once
+// so the model knows how to run tests without 3 discovery tool calls.
+function getTestRunnerContext() {
+  try {
+    if (_testRunnerDetector) return _testRunnerDetector.formatForPrompt();
+  } catch {}
+  return '';
+}
+
+// Active plan injection (Feature 8). Returns '' when no plan is active.
+function getActivePlanContext() {
+  try {
+    if (_planTracker && _planTracker.plan) {
+      return _planTracker.formatForPrompt();
+    }
+  } catch {}
+  return '';
+}
+
+// Auto-load knowledge notes (algorithm cheat sheets, syntax reminders, etc.)
+// from the project's knowledge/ directory based on keyword overlap with the
+// last user message. Disabled if the directory doesn't exist.
+function getKnowledgeContext(messages) {
+  try {
+    const lastUser = [...messages].reverse().find(m => m.role === 'user');
+    if (!lastUser || typeof lastUser.content !== 'string') return '';
+    const loader = _knowledgeLoader;
+    if (!loader) return '';
+    const maxTokens = Math.min(1500, Math.floor(((config?.context?.detected_window || 32768) * 0.04)));
+    return loader.formatForPrompt(lastUser.content, { maxTokens });
+  } catch {
+    return '';
+  }
 }
 
 // Auto-load relevant memory for the current task (injected into system prompt)
@@ -1356,6 +1601,31 @@ async function chatCompletion(config, messages) {
       temperature: 0.1,
       max_tokens: 4096,
     };
+
+    // Apply thinking budget for reasoning models (Qwen3, DeepSeek R1, Claude with
+    // thinking, GPT-5 reasoning). Without this, a small reasoning model can spend
+    // 8000 tokens "thinking" about a trivial rename. Defaults to 2000 tokens;
+    // override with SMALLCODE_THINKING_BUDGET. Set SMALLCODE_THINKING_DISABLE=true
+    // to turn it off entirely.
+    try {
+      const { applyThinkingBudget } = require('../src/model/thinking_budget');
+      applyThinkingBudget(body);
+    } catch {} // optional — fall through if module unavailable
+
+    // Adaptive retry temperature (Feature 12): nudge temperature per attempt.
+    // Only count attempts for the CURRENT file being validated (not stale entries
+    // from previous files that have already been fixed or reset).
+    try {
+      const { applyAdaptiveTemperature } = require('../src/model/adaptive_temp');
+      // Sum only numeric values (filePath keys) that are currently non-zero.
+      // Exclude __history:*, __decompose:* meta-keys and already-resolved (0) entries.
+      const currentAttempt = Object.entries(improvementAttempts)
+        .filter(([k, v]) => !k.startsWith('__') && typeof v === 'number' && v > 0)
+        .reduce((acc, [, v]) => acc + v, 0);
+      if (currentAttempt > 0) {
+        applyAdaptiveTemperature(body, currentAttempt, { isRepair: true });
+      }
+    } catch {}
 
     // Build headers — include Authorization if an API key is available
     const headers = { 'Content-Type': 'application/json' };
@@ -1700,6 +1970,34 @@ async function runNonInteractive(config, prompt) {
   }
 
   await runAgentLoop(prompt, config);
+
+  // Explicit cleanup so the process exits cleanly. The persistent shell holds
+  // a child cmd.exe with open stdio pipes that would otherwise keep the
+  // Node event loop alive even after the agent loop returns.
+  try {
+    const { resetShell } = require('../src/tools/shell_session');
+    resetShell();
+  } catch {}
+  try {
+    const { resetReadTracker } = require('../src/tools/read_tracker');
+    resetReadTracker();
+  } catch {}
+  try {
+    const { resetDedup } = require('../src/tools/dedup');
+    resetDedup();
+  } catch {}
+  try {
+    const { resetSnapshotManager } = require('../src/session/snapshot');
+    resetSnapshotManager();
+  } catch {}
+  try {
+    const { resetTrustDecay } = require('../src/tools/trust_decay');
+    resetTrustDecay();
+  } catch {}
+  killMCP();
+  if (_lspClient) { try { _lspClient.stop(); } catch {} }
+  // Force exit after a short tick to let any pending log writes flush.
+  setTimeout(() => process.exit(0), 100).unref();
 }
 
 // ─── MCP Server Mode ─────────────────────────────────────────────────────────

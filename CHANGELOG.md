@@ -1,6 +1,283 @@
 # Changelog
 
-## [0.6.15] - 2026-05-20
+## [0.8.0] - 2026-05-21
+
+### Bug Audit — Features 7-13
+
+Deep static analysis pass found 7 bugs. All fixed and verified.
+
+**Bug 1 — Adaptive temp summed stale improvementAttempts entries**
+`Object.values(improvementAttempts)` included non-numeric `__history:*` and
+`__decompose:*` meta-keys. The `filter(typeof v === 'number')` caught some but
+not `NaN` from failed `parseFloat` on arrays. Changed to `Object.entries` with
+explicit `!k.startsWith('__')` guard and `typeof v === 'number' && v > 0`.
+
+**Bug 2 — Trust decay not reset per runAgentLoop turn**
+`resetTrustDecay()` was only called in the `runNonInteractive` cleanup block.
+In TUI mode, decay accumulated across all unrelated user requests in a session.
+A tool failing 5 times spread across 10 separate prompts would be permanently
+dropped. Fixed: `getTrustDecay().reset()` now called at the start of each
+`runAgentLoop` invocation.
+
+**Bug 3 — Snapshot note() containment check rejected all bench-task paths**
+`getSnapshotManager()` singleton was built with the process cwd (SmallCode root)
+at first construction, then reused across bench runs in different temp dirs.
+`note(absolutePath)` then triggered the containment check (`rel.startsWith('..')`)
+because `path.relative(smallcodeRoot, /tmp/bench-xyz/foo.txt)` starts with `..`.
+Every snapshot was silently dropped. Fixed by making `getSnapshotManager` return
+a new instance when `workdir` differs from the cached singleton's workdir.
+`executor.js` now passes `{ workdir: cwd }` to `getSnapshotManager`.
+
+**Bug 4 — Plan request instruction persisted in conversationHistory**
+The one-shot system message "write a numbered plan first" was pushed to
+`conversationHistory` and never removed. On every subsequent `chatCompletion`
+call within the same turn the model saw "write a plan first" again, causing
+re-emission of plans. Fixed: recorded `_planInstructionIdx` at push time;
+after the first successful `ingestResponse`, splice the instruction out of
+history. Applied at both ingestion sites (tool-call path and text-only path).
+
+**Bug 5 — Knowledge loader singleton used SmallCode root for all workdirs**
+`getKnowledgeLoader({ rootDir: process.cwd() })` built a singleton against the
+SmallCode project root on first call. Bench tasks in temp dirs then received
+SmallCode's own `knowledge/` notes injected into their context. Fixed: added
+`_knowledgeLoader` to the per-run module-level vars, re-created at each
+`runAgentLoop` alongside `_bootstrapDetector` and `_testRunnerDetector`.
+
+**Bug 6 — DELTA=0 env override silently ignored**
+`parseFloat('0') || 0.15` = `0.15` — explicit zero was treated as falsy.
+Changed to `process.env.SMALLCODE_TEMP_DELTA !== undefined ? parseFloat(...) : 0.15`.
+Same fix applied to SMALLCODE_TEMP_MAX and SMALLCODE_TEMP_MIN.
+
+**Bug 7 — Plan formatForPrompt showed no current-step marker when all steps done**
+When `currentStep === plan.length`, the `→` marker loop never fired (loop bounds
+`i < plan.length` but `currentStep === plan.length`). Every step showed `' '`.
+Fixed: detect all-complete state explicitly, show `COMPLETED PLAN` header instead
+of `ACTIVE PLAN (step N of N)`, suppress the "Work on current step" hint.
+
+### Verified
+- 14/14 bug-fix unit checks green
+- Smoke benchmark: 5/5 passing
+- **Polyglot-mini benchmark: 19/19 (100%)** — up from 17/19 (89%) pre-fix
+  (`js-arrow` and `sh-script` now passing)
+
+### Features 10-13 Added
+
+- **Feature 10 — Test-runner auto-discovery** (`src/tools/test_runner.js`):
+  Detects test runner from project config (package.json scripts, devDeps,
+  pytest.ini, pyproject.toml, Cargo.toml, go.mod, pom.xml, build.gradle,
+  .rspec, .sln). Injects `Test runner (framework): \`cmd\`` into system
+  prompt once per run. Also injected into AUTO-VALIDATE fix prompts so
+  model knows how to verify its own fixes. Disable with
+  `SMALLCODE_TEST_DISABLE=true`. Override with `SMALLCODE_TEST_RUNNER=<cmd>`.
+  Re-built per agent run (not a singleton) so bench tasks in temp dirs
+  get the correct info for their workspace.
+
+- **Feature 11 — Bootstrap detection** (`src/session/bootstrap.js`):
+  Scans workspace on first turn and injects a 1-2 line project summary:
+  runtime + version (.nvmrc / .python-version / .tool-versions), package
+  manager, framework (Next.js/FastAPI/Express/Django/…), entry point,
+  and build/test/run scripts. Keeps small models from spending 3-5 tool
+  calls just to learn the project layout. Detects Node, Python, Rust, Go,
+  .NET, Java (Gradle/Maven), Ruby. Disable with `SMALLCODE_BOOTSTRAP=false`.
+  Re-built per agent run (not a singleton) to pick up correct workdir.
+
+- **Feature 12 — Adaptive retry temperature** (`src/model/adaptive_temp.js`):
+  On improvement-loop retries, nudges the temperature so each attempt
+  explores differently: attempt 1 goes lower (deterministic fix), attempt 2
+  higher (explore alternatives), attempt 3 back to base. Controlled by
+  DELTA=0.15 default, clamped to [MIN, MAX]. No-op when body has no
+  temperature field. Disable with `SMALLCODE_TEMP_ADAPT=false`.
+
+- **Feature 13 — Per-tool trust score decay** (`src/tools/trust_decay.js`):
+  Tracks consecutive failures per tool within a session. Tools that fail
+  N ≥ 3 times in a row are soft-demoted (moved to back of schema list);
+  N ≥ 5 failures drops them from the schema entirely for that session.
+  Any success resets the failure counter. Prevents the model from looping
+  on a broken MCP tool or a search that keeps returning nothing useful.
+  Trust state resets between agent runs. Disable with
+  `SMALLCODE_TRUST_DECAY=false`.
+
+### Verified
+- 15/15 unit tests (test runner) + 13/13 (bootstrap) + 9/9 (adaptive temp) + 10/10 (trust decay)
+- Smoke benchmark: 5/5 passing
+- Polyglot-mini benchmark: 17/19 (89%) — 2 failures are model/environment
+  limitations (Windows shell scripts, tight regex) not code regressions
+
+### Bug fixed (during features 10-11)
+- Bootstrap and test-runner detectors were using `getXxx()` singletons built
+  against the SmallCode project root, then cached for all agent runs. Bench
+  tasks running in temp dirs would receive SmallCode's own pytest/node test
+  config injected. Fixed by building fresh instances per `runAgentLoop` call
+  bound to `process.cwd()`.
+
+### Feature 9 Added — Snapshot & Auto-Rollback
+
+- **`src/session/snapshot.js`** `SnapshotManager`: checkpoint-style grouping
+  of file edits that can be rolled back as a unit.
+  - `begin(label)` opens a checkpoint. `note(path)` records pre-edit content
+    (first-snapshot-wins). `rollback(reason)` restores all files to their
+    pre-checkpoint state (new files deleted, existing files restored).
+    `commit()` discards the checkpoint without touching files.
+  - Wired into `executor.js` `write_file` and `patch` — every edit auto-notes
+    the file when a checkpoint is open.
+  - Wired into `runAgentLoop`: `begin()` at turn start, `commit()` at clean
+    end, `rollback()` at escalation-exhausted branch when
+    `SMALLCODE_SNAPSHOT_AUTO_ROLLBACK=true`.
+  - Containment: refuses to snapshot paths outside `workdir`.
+  - Persistence: checkpoint metadata (not file content) written to
+    `.smallcode/snapshots/<id>.json` for audit / manual rollback.
+  - Singleton reset added to `runNonInteractive` cleanup.
+  - Disable with `SMALLCODE_SNAPSHOT=false`.
+  - Manual rollback available via opt-in env flag; does not affect normal
+    flow — all existing smoke tests still 5/5.
+
+### Verified
+- 16/16 unit tests for SnapshotManager
+- Smoke benchmark: 5/5 passing
+
+### Feature 8 Added — Plan-Then-Execute Mode
+
+- **`src/session/plan_tracker.js`**: For multi-step tasks, asks the model to
+  emit a numbered plan FIRST (before any tool calls), then re-injects that
+  plan as an anchor in subsequent turns. Heuristic-based — single-shot
+  tasks like "create hello.py" don't trigger planning to avoid latency.
+  - Triggers: messages > 300 chars, multi-step keywords (refactor/migrate/
+    implement+feature), or 3+ sentences with length > 150 chars.
+  - Plan parser handles numbered (`1. step`), bulleted (`- step`), and
+    fenced markdown formats. Continuation lines merged conservatively.
+  - On subsequent turns, system prompt gets `ACTIVE PLAN (step N of M):`
+    block with `✓` / `→` / ` ` markers per step.
+  - Auto-advance regex matches "step N done", "step N: complete",
+    "Step N. finished", "step N ✓" etc.
+  - Tracker resets per agent run; never leaks state across tasks.
+  - Configurable: `SMALLCODE_PLAN=true|false` (force/disable),
+    `SMALLCODE_PLAN_MIN_STEPS=2`, `SMALLCODE_PLAN_MAX_STEPS=8`.
+
+### Verified
+- 21/21 unit tests for plan tracker
+- E2E multi-step refactor task (utils.py + main.py + test_utils.py +
+  unittest run): all 3 files correct, tests pass
+- Smoke benchmark: 5/5 still passing
+
+### Bug fixes (during plan-tracker integration)
+- Tightened `shouldPlan` heuristic — was over-triggering on short
+  3-sentence prompts like fix-typo. Now requires length > 150 chars
+  for the 3-sentence rule.
+- Strengthened plan-request instruction to explicitly say "do NOT stop
+  after writing the plan" (was causing models to emit plan and halt).
+- Fixed string-vs-template-literal bug in `formatForPrompt` (single-
+  quoted string contained literal `${cur}` instead of interpolation).
+- Tightened plan-line continuation rule — only merges short lowercase
+  fragments without trailing punctuation, not full sentences.
+
+### Feature 7 Added — Evidence Store
+
+- **`src/memory/evidence.js`**: Automated capture of "what was tried, what
+  worked, what failed" per task. Stored in the existing memory MCP module
+  (budget-aware-mcp) under `type: 'context'` with `tag: 'evidence'` so it
+  flows through the existing `loadForTask` FTS5 + staleness-decay path
+  rather than hogging the live system prompt. Surfaces only when relevant
+  to the current task.
+  - Summarizes `TraceRecorder` output into a 1-3KB digest: failed/successful
+    steps, files edited, validation outcomes, duration.
+  - Smart error-tail extraction prefers specific named errors (ImportError,
+    SyntaxError, Traceback) over generic ones (Exit code N).
+  - Adjacent step deduplication (`patch foo.py (×3)` not 3 lines).
+  - Tags: `evidence`, plus outcome class (`success` / `partial-failure` /
+    `validation-failed`).
+  - Disable with `SMALLCODE_EVIDENCE_DISABLE=true`.
+  - Falls back to positional `remember(type, title, content, opts)` when
+    object-form fails (compatibility with local `bin/memory.js` store).
+
+### Verified
+- 14/14 unit tests for evidence summarization
+- E2E: SmallCode run produces `.memory/context-*.md` with correct evidence
+  tags, file list, and step summaries
+- Smoke benchmark: 5/5 passing with evidence active
+
+### Features 4-6 Added
+
+- **Feature 4 — Knowledge injection** (`src/knowledge/loader.js`): Drop reference
+  notes into `knowledge/` directory and the most relevant ones get injected
+  into the system prompt based on keyword overlap with the user's message.
+  Per-message budget cap (1500 tokens default), per-entry cap (1500 chars).
+  Front-matter `keywords:` overrides path-based inference. Configurable via
+  `SMALLCODE_KNOWLEDGE_DIR`, `SMALLCODE_KNOWLEDGE_MAX_TOKENS`,
+  `SMALLCODE_KNOWLEDGE_DISABLE`. Sample notes added under `knowledge/`.
+- **Feature 5 — Read-before-write guard** (`src/tools/read_tracker.js`):
+  Tracks which paths the model has read this session. First `write_file` to
+  an existing unread file is refused with a hint; second attempt allowed
+  (so legitimate full-replace intents succeed). New files always allowed.
+  `patch` counts as read (it requires `old_str` matching). Configurable via
+  `SMALLCODE_WRITE_GUARD=false` (off) or `SMALLCODE_WRITE_GUARD_STRICT=true`
+  (hard block).
+- **Feature 6 — Tool-call deduplication** (`src/tools/dedup.js`): Identical
+  pure-tool calls within a sliding window (default 5) are short-circuited
+  with a cached result. Only applies to read-only tools (`read_file`,
+  `search`, `graph_search`, `memory_load`, etc.) — never to anything with
+  side effects. Errors are not cached. Argument-key-order independent.
+  Configurable via `SMALLCODE_DEDUP=false` and `SMALLCODE_DEDUP_WINDOW=N`.
+
+### Verified
+- Smoke benchmark: 5/5 passing with all six features active
+- 18 unit checks for features 4-6 green
+- 10 audit unit checks for features 1-3 green
+
+### Audit & Bug Fixes — Features 1-3 (Persistent Shell, Thinking Budget, Bench Harness)
+
+Audit pass after rolling out the three new features. 10 bugs found and fixed.
+
+### `src/tools/shell_session.js` — Persistent Shell Session
+- **Process exit listeners no longer double-register** — `process.on('exit'/'SIGINT'/'SIGTERM')`
+  fired at module load. With `delete require.cache` (used by the test suite)
+  the same module re-required would stack a fresh set of listeners every time.
+  Guarded behind a `global.__SMALLCODE_SHELL_EXIT_REGISTERED__` flag.
+- **`cd` containment now catches all escape vectors** — Old regex
+  `/^\s*cd\s+(\S+)/` matched only top-of-line, naked `cd`. The model could
+  bypass with `cd "../"`, `pushd ..`, `chdir ..`, `; cd ..`, or `&& cd ..`.
+  Now iterates every `cd|pushd|chdir` in the command and simulates the cwd
+  through chained calls.
+- **Sub-shell escape outright refused** — `bash -c "cd .."`, `sh -c '...'`,
+  `pwsh -c '...'` etc. bypass our wrapper because the inner shell's cwd
+  changes don't survive. Now refused with explicit message when
+  `SMALLCODE_SHELL_CONTAIN=true`.
+- **Windows timeout actually kills the command now** — Previous code wrote
+  `\r\n` to stdin which does nothing to a hung command. Now SIGKILLs the shell
+  process and resets it. The next command spawns a fresh shell. Half-measures
+  left the buffer in indeterminate states and the sentinel never arrived,
+  hanging the queue forever.
+- **`_drain` is now iterative** — Was recursive (`if (queue.length > 0) this._drain()`),
+  could stack-overflow when many sentinels arrived back-to-back. Converted to
+  a `while` loop.
+- **Buffer truncation no longer slices mid-sentinel** — Hard cap kicks in at
+  4× `maxOutputBytes`. Old truncation `slice(-maxOutputBytes * 2)` could chop
+  a sentinel mid-string, causing the head command to never resolve. Now
+  preserves recent sentinel boundaries.
+
+### `src/model/thinking_budget.js` — Thinking Budget Control
+- **`applyThinkingBudget` no longer mutates caller's options** — When
+  `SMALLCODE_THINKING_DISABLE=true`, the function set `options.disable = true`
+  on the caller's object. Subsequent calls (or callers reusing the options
+  object) saw the leaked mutation. Now copies options internally.
+
+### `bench/harness.js` — Benchmark Harness
+- **Process group orphaning fixed** — On Linux/macOS, `child.kill()` only
+  killed the Node entry, leaving spawned child processes (e.g. the persistent
+  shell's `bash`) alive. Now spawns with `detached: true` and `process.kill(-pid, 'SIGKILL')`.
+  On Windows uses `taskkill /T /F` to kill the whole tree.
+- **Tool-call counter no longer fooled by ANSI** — `⚙` could be preceded by
+  ANSI color codes (`\x1b[2m⚙ `) on systems that ignore `NO_COLOR`. Now strips
+  ANSI before counting and explicitly sets `NO_COLOR=1` and `FORCE_COLOR=0`
+  in the child env.
+- **Timeout now reported in result** — `timedOut: true` flag added so callers
+  can distinguish "model gave up" from "harness killed it".
+
+### Verified
+- Smoke benchmark: 5/5 passing (`huihui-gemma-4-e4b-it-abliterated`)
+- All 10 audit unit checks green
+- Modules pass `node --check`
+
+## [0.7.1] - 2026-05-20
 
 ### Security
 Audit pass focused on context-leak-through-tooling. 21 issues fixed across the

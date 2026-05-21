@@ -16,6 +16,9 @@ const {
   sanitizeToolOutput,
   stripAnsi: secStripAnsi,
 } = require('../src/security/sanitize');
+const { getShell } = require('../src/tools/shell_session');
+const { getReadTracker } = require('../src/tools/read_tracker');
+const { getSnapshotManager } = require('../src/session/snapshot');
 
 // ─── RTK (Rust Token Killer) integration ─────────────────────────────────────
 // Auto-rewrites supported bash commands through rtk for 60-90% token savings.
@@ -93,6 +96,8 @@ async function executeTool(name, args, ctx) {
       if (!safe.ok) return { error: `read_file rejected: ${safe.reason}` };
       const filePath = safe.fullPath;
       if (!fs.existsSync(filePath)) return { error: `File not found: ${args.path} (checked: ${filePath})` };
+      // Mark as read so the write-guard (Feature 5) lets subsequent writes through
+      try { getReadTracker().recordRead(filePath, cwd); } catch {}
       const content = fs.readFileSync(filePath, 'utf-8');
       const lines = content.split('\n');
       const start = (args.start_line || 1) - 1;
@@ -124,11 +129,23 @@ async function executeTool(name, args, ctx) {
       const safe = safeResolvePath(args.path, cwd);
       if (!safe.ok) return { error: `write_file rejected: ${safe.reason}` };
       const filePath = safe.fullPath;
+      // Read-before-write guard — small models often overwrite files they
+      // never read. First write to an unread existing file is refused with
+      // a hint; second attempt allowed (so legitimate "fully replace" intents
+      // succeed). Disable with SMALLCODE_WRITE_GUARD=false.
+      const tracker = getReadTracker();
+      const guard = tracker.checkWrite(filePath, cwd);
+      if (!guard.ok) {
+        return { error: guard.reason };
+      }
       const dir = path.dirname(filePath);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       const existed = fs.existsSync(filePath);
       const oldContent = existed ? fs.readFileSync(filePath, 'utf-8') : null;
+      // Snapshot for auto-rollback (Feature 9). No-op if no checkpoint open.
+      try { getSnapshotManager({ workdir: cwd }).note(filePath, oldContent); } catch {}
       fs.writeFileSync(filePath, args.content);
+      tracker.recordWrite(filePath, cwd);
       const lineCount = args.content.split('\n').length;
       const action = existed ? 'Updated' : 'Created';
       if (_fullscreenRef && existed && oldContent) {
@@ -144,7 +161,11 @@ async function executeTool(name, args, ctx) {
       if (!safe.ok) return { error: `patch rejected: ${safe.reason}` };
       const filePath = safe.fullPath;
       if (!fs.existsSync(filePath)) return { error: `File not found: ${args.path} (checked: ${filePath})` };
+      // Patching counts as having read the file (it requires old_str matching)
+      try { getReadTracker().recordRead(filePath, cwd); } catch {}
       let content = fs.readFileSync(filePath, 'utf-8');
+      // Snapshot for auto-rollback (Feature 9). No-op if no checkpoint open.
+      try { getSnapshotManager({ workdir: cwd }).note(filePath, content); } catch {}
       const count = content.split(args.old_str).length - 1;
       if (count === 0) return { error: `old_str not found in ${args.path}` };
       if (count > 1) return { error: `old_str matches ${count} locations. Include more context.` };
@@ -208,12 +229,43 @@ async function executeTool(name, args, ctx) {
       if (flags && flags.verbose && _fullscreenRef) {
         _fullscreenRef.addTool('bash', 'ok', `$ ${command}`);
       }
+
+      // Persistent shell session: by default ON, can be disabled with
+      // SMALLCODE_SHELL_PERSIST=false. Maintains cwd, env vars, and shell
+      // state across calls so `cd src` followed by `ls` works as expected.
+      const usePersistent = process.env.SMALLCODE_SHELL_PERSIST !== 'false';
+      if (usePersistent) {
+        try {
+          const shell = getShell({ cwd, timeout: 30000 });
+          const result = await shell.run(command);
+          const maxOutput = (config && config.context?.detected_window || 128000) < 64000 ? 1500 : 3000;
+          const safeOutput = result.stdout || '';
+          const trimmed = safeOutput.length > maxOutput
+            ? safeOutput.slice(0, maxOutput - 500) + '\n...(truncated)...\n' + safeOutput.slice(-300)
+            : safeOutput;
+          if (flags && flags.verbose && _fullscreenRef && trimmed.trim()) {
+            const lines = trimmed.split('\n').slice(0, 10);
+            for (const line of lines) _fullscreenRef.addChat('system', '  ' + line);
+          }
+          if (result.timedOut) {
+            return { result: trimmed || '(no output before timeout)', error: 'Timed out (killed after 30s)', command };
+          }
+          if (result.error) {
+            return { result: trimmed, error: result.error, command };
+          }
+          if (result.exitCode !== 0) {
+            return { result: trimmed || '(no output)', error: `Exit code ${result.exitCode}`, command };
+          }
+          return { result: trimmed || '(no output)', command };
+        } catch (e) {
+          // Fall through to one-shot execSync if persistent shell errors
+        }
+      }
+
+      // Fallback: one-shot execSync (original behavior, no state retention)
       try {
         const output = execSync(command, { encoding: 'utf-8', timeout: 30000, cwd, maxBuffer: 1024 * 1024 });
         const maxOutput = (config && config.context?.detected_window || 128000) < 64000 ? 1500 : 3000;
-        // Sanitize: strip ANSI/control chars + redact secrets so a command
-        // like `cat .env` or `printenv` doesn't leak API keys back into
-        // the model's context window.
         const safeOutput = sanitizeToolOutput(output);
         const trimmed = safeOutput.length > maxOutput ? safeOutput.slice(0, maxOutput - 500) + '\n...(truncated)...\n' + safeOutput.slice(-300) : safeOutput;
         if (flags && flags.verbose && _fullscreenRef && trimmed.trim()) {

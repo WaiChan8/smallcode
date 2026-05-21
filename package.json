@@ -1,7 +1,7 @@
 {
   "name": "smallcode",
-  "version": "0.7.1",
-  "description": "AI coding agent optimized for small LLMs (≤20B parameters)",
+  "version": "0.8.0",
+  "description": "AI coding agent optimized for small LLMs (8B-35B parameters)",
   "main": "src/api/index.js",
   "bin": {
     "smallcode": "bin/smallcode.js",
@@ -12,7 +12,12 @@
     "start": "node bin/smallcode.js",
     "dev": "node bin/smallcode.js",
     "eval": "node bin/smallcode.js --eval classify_accuracy",
-    "mcp": "node bin/smallcode.js --mcp"
+    "mcp": "node bin/smallcode.js --mcp",
+    "bench": "node bench/harness.js --suite smoke",
+    "bench:smoke": "node bench/harness.js --suite smoke",
+    "bench:polyglot": "node bench/harness.js --suite polyglot-mini",
+    "bench:tools": "node bench/harness.js --suite tool-use",
+    "bench:list": "node bench/harness.js --list"
   },
   "dependencies": {
     "bonescript-compiler": "0.14.0",
