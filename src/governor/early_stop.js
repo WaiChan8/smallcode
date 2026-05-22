@@ -54,6 +54,58 @@ class EarlyStopDetector {
   }
 
   /**
+   * Track read-only tool calls. Returns a StopSignal if the model is stuck
+   * in a read/discovery loop (calling find_files, read_file, list_projects,
+   * graph_search repeatedly without producing any written output).
+   *
+   * This is the "endless review" failure mode: the model keeps gathering
+   * context because "review X" has no clear terminal state. After N read-only
+   * calls without any write/bash output, we inject a nudge to produce findings.
+   *
+   * @param {string} toolName - name of the tool called
+   * @param {boolean} hasWrittenAnything - true if write_file/patch/bash succeeded this turn
+   */
+  recordReadTool(toolName, hasWrittenAnything) {
+    const READ_TOOLS = new Set(['read_file', 'find_files', 'list_projects', 'graph_search', 'explain_symbol', 'search', 'find_and_read', 'search_and_read', 'memory_load']);
+    if (!READ_TOOLS.has(toolName)) {
+      // Non-read tool used — reset the read counter
+      this._readOnlyStreak = 0;
+      return null;
+    }
+
+    // If the model has already produced written output this turn, reading more is fine
+    if (hasWrittenAnything) {
+      this._readOnlyStreak = 0;
+      return null;
+    }
+
+    this._readOnlyStreak = (this._readOnlyStreak || 0) + 1;
+
+    if (this._readOnlyStreak >= 8) {
+      const count = this._readOnlyStreak;
+      this._readOnlyStreak = 0;
+      return {
+        reason: 'read_loop',
+        message: `Model called read-only tools ${count} times without producing output.`,
+        action: 'inject_correction',
+        injection: `[SYSTEM] You have read ${count} files/results without producing any output yet. You have enough context. STOP reading and START writing your findings, review, or answer now. If you need one more specific thing, get it — then write your response immediately after.`,
+      };
+    }
+
+    // Softer nudge at 5 reads
+    if (this._readOnlyStreak === 5) {
+      return {
+        reason: 'read_loop_warning',
+        message: 'Model has read 5 things without producing output — nudging toward output.',
+        action: 'inject_correction',
+        injection: `[SYSTEM] You've read 5 files/results. You likely have enough context. After your next read (if needed), write your findings immediately — don't keep reading.`,
+      };
+    }
+
+    return null;
+  }
+
+  /**
    * Track patch tool results. Returns a StopSignal if the model is stuck
    * in a patch spiral (repeatedly failing OR making no-op patches on the same file).
    * Tracks both failures and total attempts per file per turn.
@@ -131,6 +183,7 @@ Do NOT attempt another patch on this file.`,
   newTurn() {
     this.patchFailures = {};
     this._patchAttempts = {};
+    this._readOnlyStreak = 0;
   }
 }
 

@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.9.10] - 2026-05-22
+
+### fix: read-loop detection + one-question clarifier policy
+
+**Read-loop detection (`src/governor/early_stop.js`)**
+
+The early-stop detector now catches the "endless review" failure mode: a model
+that calls `read_file`, `find_files`, `graph_search`, etc. repeatedly without
+producing any written output. Two thresholds:
+
+- At 5 consecutive read-only calls: soft nudge injected — "you likely have
+  enough context, write your findings after the next read"
+- At 8 consecutive read-only calls: hard injection + loop break — "you have
+  read 8 results, STOP reading and START writing now"
+
+Counter resets when the model writes anything (`write_file`/`patch`) or when
+a new turn starts. Works for: `read_file`, `find_files`, `list_projects`,
+`graph_search`, `explain_symbol`, `search`, `find_and_read`, `search_and_read`,
+`memory_load`.
+
+**One-question clarifier policy (`src/session/clarify.js`, `bin/smallcode.js`)**
+
+The clarification instruction now tells the model to ask its question AND
+immediately start executing based on its best interpretation — no waiting for
+confirmation. The dev loop no longer pauses after a clarifying question if the
+model already issued tool calls in the same response. If the model only asked
+without starting work, the `assistantAskedQuestion` guard ensures the clarifier
+never re-fires on the user's reply, so the next turn goes straight into execution.
+
+Net behavior: "fix it" → model says "I'm assuming you mean X, quick question: Y?
+Starting now..." and proceeds. User steers mid-task if the assumption was wrong.
+
+Files changed: `src/governor/early_stop.js`, `src/session/clarify.js`, `bin/smallcode.js`
+
+---
+
 ## [0.9.9] - 2026-05-22
 
 ### feat: litecode architecture — query routing, path validation, dependency graph, parallel executor

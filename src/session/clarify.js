@@ -48,13 +48,16 @@ function needsClarification(message) {
 
 /**
  * Generate a clarification prompt to inject into the system message.
- * Tells the model to ask before acting.
+ * Tells the model to ask ONE question and then immediately start working
+ * based on its best interpretation — do not wait for confirmation.
  */
 function getClarificationInstruction() {
-  return `The user's message is vague or very short. Before taking action:
-1. State what you THINK they want (your best interpretation)
+  return `The user's message is vague or very short. Do the following in a SINGLE response:
+1. State what you THINK they want (your best interpretation, one sentence)
 2. Ask ONE specific clarifying question
-3. Do NOT use any tools until the user confirms or clarifies.`;
+3. IMMEDIATELY start executing based on your best interpretation — do not wait for confirmation. Use tools now.
+
+You get exactly one question. Then you work. The user can correct you mid-task if needed.`;
 }
 
 module.exports = { needsClarification, getClarificationInstruction };

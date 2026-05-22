@@ -557,7 +557,24 @@ async function runAgentLoop(userMessage, config) {
         process.stdout.write(tui.renderMarkdown(message.content));
       }
     }
-    return; // Wait for user to clarify
+
+    // One-question policy: model asked its question AND started working.
+    // If the model already issued tool calls in its clarification response,
+    // fall through to the main agent loop below to continue executing.
+    // If it only asked a question (no tool calls), fall through anyway —
+    // the model will continue on its best interpretation next turn.
+    // Do NOT return here — the dev loop must continue.
+    if (message?.tool_calls?.length > 0) {
+      // Model already started working — the main loop below will pick up
+      // the tool calls from this response. Reconstruct userMessage for the
+      // main loop by using what's already in conversationHistory.
+      // Fall through to main agent loop.
+    } else {
+      // Model asked its question but didn't start working yet.
+      // In interactive mode, show the question and wait for the next user turn.
+      // The clarifier will NOT re-fire next turn (assistantAskedQuestion guard).
+      return;
+    }
   }
 
   // Detect drag-and-dropped image files (bare path pasted into terminal)
@@ -1423,6 +1440,20 @@ Read the FULL file above carefully. Fix ALL errors. Use the patch tool with the 
             conversationHistory.push({ role: 'user', content: stopSignal.injection });
             // Don't continue with normal flow — force model to rewrite
             break;
+          }
+        }
+
+        // ── EARLY-STOP: Detect read loop (model endlessly reading without producing output) ──
+        {
+          const hasWrittenAnything = _editedFilesThisTurn.length > 0;
+          const readLoopSignal = earlyStop.recordReadTool(toolName, hasWrittenAnything);
+          if (readLoopSignal) {
+            console.log(`  \x1b[33m⚡ ${readLoopSignal.message}\x1b[0m`);
+            if (_fullscreenRef) _fullscreenRef.addTool('warning', 'warn', 'read loop — nudging toward output');
+            conversationHistory.push({ role: 'user', content: readLoopSignal.injection });
+            // For the hard stop (8 reads), break the loop to force a response
+            if (readLoopSignal.reason === 'read_loop') break;
+            // For the soft nudge (5 reads), let the model continue with the nudge injected
           }
         }
 
