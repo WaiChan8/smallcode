@@ -32,7 +32,13 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
           console.log('');
           process.stdout.write(chalk.gray('  Fetching available models... '));
           try {
-            const resp = await fetch(`${config.model.baseUrl}/models`);
+            // Build auth headers — required by OpenWebUI and other authenticated endpoints
+            const modelListHeaders = { 'Content-Type': 'application/json' };
+            const apiKey = process.env.SMALLCODE_API_KEY || process.env.OPENAI_API_KEY ||
+              process.env.ANTHROPIC_API_KEY || process.env.DEEPSEEK_API_KEY || config.model.apiKey;
+            if (apiKey) modelListHeaders['Authorization'] = `Bearer ${apiKey}`;
+
+            const resp = await fetch(`${config.model.baseUrl}/models`, { headers: modelListHeaders });
             if (resp.ok) {
               const data = await resp.json();
               const models = data.data || data.models || [];
@@ -46,7 +52,7 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
               console.log('');
               console.log(chalk.gray('  Switch: /model <name>'));
             } else {
-              console.log(chalk.red('failed'));
+              console.log(chalk.red(`failed (HTTP ${resp.status})`));
             }
           } catch (e) {
             console.log(chalk.red(`error: ${e.message}`));
