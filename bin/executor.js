@@ -226,6 +226,15 @@ async function executeTool(name, args, ctx) {
     }
 
     case 'patch': {
+      const __missing = ['path', 'old_str', 'new_str']
+        .filter(k => typeof args[k] !== 'string');
+      if (__missing.length) {
+        return {
+          error: `patch: missing or non-string arg(s): ${__missing.join(', ')}. ` +
+                 `received: ${JSON.stringify(args).slice(0, 200)}`,
+          kind: 'validation',
+        };
+      }
       const safe = safeResolvePath(args.path, cwd);
       if (!safe.ok) return { error: `patch rejected: ${safe.reason}` };
       const filePath = safe.fullPath;
@@ -504,6 +513,15 @@ async function executeTool(name, args, ctx) {
     }
 
     case 'read_and_patch': {
+      const __missing = ['path', 'old_str', 'new_str']
+        .filter(k => typeof args[k] !== 'string');
+      if (__missing.length) {
+        return {
+          error: `read_and_patch: missing or non-string arg(s): ${__missing.join(', ')}. ` +
+                 `received: ${JSON.stringify(args).slice(0, 200)}`,
+          kind: 'validation',
+        };
+      }
       const safe = safeResolvePath(args.path, cwd);
       if (!safe.ok) return { error: `read_and_patch rejected: ${safe.reason}` };
       const filePath = safe.fullPath;
@@ -524,6 +542,15 @@ async function executeTool(name, args, ctx) {
     }
 
     case 'create_and_run': {
+      const __missing = ['path', 'content']
+        .filter(k => typeof args[k] !== 'string');
+      if (__missing.length) {
+        return {
+          error: `create_and_run: missing or non-string arg(s): ${__missing.join(', ')}. ` +
+                 `received: ${JSON.stringify(args).slice(0, 200)}`,
+          kind: 'validation',
+        };
+      }
       const safe = safeResolvePath(args.path, cwd);
       if (!safe.ok) return { error: `create_and_run rejected: ${safe.reason}` };
       const filePath = safe.fullPath;

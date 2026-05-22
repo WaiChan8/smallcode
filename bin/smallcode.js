@@ -972,6 +972,14 @@ async function runAgentLoop(userMessage, config) {
       // eviction and compaction logic, not from corrupting args mid-conversation.
       // However, once a tool_call has been fully processed (tool result received),
       // we'll truncate large args in the stored message during mid-turn eviction.
+      //
+      // Poisoned-history fix: snapshot history length BEFORE pushing the assistant
+      // message + tool results. If every tool call in this turn returns a validation
+      // error, we revert to this length and inject a single user-role correction —
+      // preventing the model's malformed output from biasing the retry.
+      const __preTurnHistoryLen = conversationHistory.length;
+      const __validationErrors = [];
+
       conversationHistory.push(message);
 
       // Plan extraction (Feature 8): if the model emitted a plan in its
@@ -1080,6 +1088,12 @@ async function runAgentLoop(userMessage, config) {
         const result = await executeTool(toolName, toolArgs);
         const toolMs = Date.now() - toolStart2;
 
+        // Track validation errors so the poisoned-history fix can revert
+        // bad assistant turns where the model emitted malformed tool args.
+        if (result && result.kind === 'validation') {
+          __validationErrors.push(`${toolName}: ${result.error}`);
+        }
+
         // Handle select_category: update the tool category so the NEXT
         // chatCompletion call injects the right tool schemas for stage 2.
         if (toolName === 'select_category' && result.category) {
@@ -1127,9 +1141,14 @@ async function runAgentLoop(userMessage, config) {
         }
 
         // Add tool result to history (cap to prevent context explosion)
-        // Default 4k chars per result — keeps 10 tool calls at ~10k tokens total
+        // Add tool result to history (cap to prevent context explosion).
+        // 8k chars (~2k tokens) fits ~240 lines, so most source files come
+        // back in a single read_file. Lower caps force multi-read sequences,
+        // each costing a full LLM turn. Mid-turn eviction is the safety net
+        // if total context still grows too large.
+        // Override with SMALLCODE_MAX_TOOL_RESULT_CHARS env var.
         const toolContent = result.result || result.error || '';
-        const maxToolResultChars = 4000;
+        const maxToolResultChars = parseInt(process.env.SMALLCODE_MAX_TOOL_RESULT_CHARS) || 8000;
         const cappedContent = toolContent.length > maxToolResultChars
           ? toolContent.slice(0, maxToolResultChars - 200) + '\n\n...(truncated, ' + toolContent.length + ' chars total)...\n' + toolContent.slice(-200)
           : toolContent;
@@ -1467,6 +1486,22 @@ Read the FULL file above carefully. Fix ALL errors. Use the patch tool with the 
             }
           }
         }
+      }
+
+      // Poisoned-history fix: if EVERY tool call in this turn produced a
+      // validation error, revert history and inject a single correction note.
+      // Without this, the model sees its own malformed tool calls + error
+      // results in context and biases sampling toward more malformed output.
+      if (__validationErrors.length > 0 && __validationErrors.length === message.tool_calls.length) {
+        conversationHistory.length = __preTurnHistoryLen;
+        conversationHistory.push({
+          role: 'user',
+          content: '[SYSTEM] Your previous response contained ONLY invalid tool-call arguments:\n' +
+                   __validationErrors.map(e => '  - ' + e).join('\n') +
+                   '\n\nRe-read the tool schemas and try again with valid arguments.',
+        });
+        if (_fullscreenRef) _fullscreenRef.addTool('warning', 'warn', 'all tool calls invalid — retrying with clean history');
+        else console.log(chalk.yellow('  ⚠ All tool calls invalidated — retrying with clean history'));
       }
 
       // Continue the loop — model may want to call more tools or fix errors
@@ -1979,7 +2014,7 @@ async function chatCompletion(config, messages) {
       messages: [systemMsg, ...processedWithImages],
       tools: getAllTools(config, currentToolCategory),
       temperature: 0.1,
-      max_tokens: 4096,
+      max_tokens: parseInt(process.env.SMALLCODE_MAX_OUTPUT_TOKENS) || 8192,
     };
 
     // Multi-model chaining (Feature #15): override model name with executor
@@ -2118,8 +2153,10 @@ async function chatCompletion(config, messages) {
 
     if (!response.ok) {
       const err = await response.text();
-      // Retry once on 4xx (handles LM Studio model reload / rate limit)
-      if (response.status >= 400 && response.status < 500) {
+      // Retry once on any non-2xx response. 5xx from llama-server is often a
+      // one-off tool-call JSON parse failure that recovers on the next sampling
+      // pass; 4xx covers rate limit / model reload.
+      if (response.status >= 400) {
         await new Promise(r => setTimeout(r, 2000));
         try {
           const retry = await fetch(`${baseUrl}/chat/completions`, {

@@ -1,5 +1,56 @@
 # Changelog
 
+## [1.0.0] - 2026-05-22
+
+### feat: reliability hardening from mebassett fork — 1.0 release
+
+Five upstream fixes from [mebassett's fork](https://github.com/mebassett/smallcode/commits/master/),
+each addressing a real failure mode observed in production with reasoning
+models on llama-server:
+
+**Executor argument validation (`bin/executor.js`)**
+The `patch`, `read_and_patch`, and `create_and_run` handlers now validate that
+required string arguments exist before dereferencing. Previously, malformed
+tool calls (missing `path`/`old_str`/`new_str`/`content`) crashed the entire
+agent process with `TypeError: Cannot read properties of undefined`. Returns
+`{ error, kind: 'validation' }` so the agent loop can recover gracefully.
+
+**Poisoned history fix (`bin/smallcode.js`)**
+When every tool call in a turn returns a validation error, the bad assistant
+message + error tool results are spliced out of `conversationHistory` and
+replaced with a single `[SYSTEM]` correction note. Without this, the model
+saw its own malformed output and biased toward producing more — death spiral
+on small models.
+
+**5xx retry (`bin/smallcode.js`)**
+The HTTP retry on `chatCompletion` now triggers on any 4xx OR 5xx response,
+not just 4xx. 5xx from llama-server is often a transient tool-call JSON parse
+failure that recovers on the next sampling pass. Previously we silently killed
+the agent loop on 5xx.
+
+**Max output tokens 4096 → 8192 (env-overridable)**
+Reasoning models (Qwen3, DeepSeek-R1, GPT-5.5) emit 2k–6k tokens of `<think>`
+content before producing tool calls. With `max_tokens: 4096`, the budget could
+be exhausted mid-`tool_calls`, producing truncated/malformed JSON. Default
+raised to 8192. Override via `SMALLCODE_MAX_OUTPUT_TOKENS`.
+
+**Tool result truncation cap 4000 → 8000 (env-overridable)**
+Per-tool-result truncation cap doubled. 4000 chars (~120 lines) forced the
+model into multi-read sequences on most real source files, each costing a
+full LLM round-trip. 8000 chars (~240 lines) covers most files in one read.
+Override via `SMALLCODE_MAX_TOOL_RESULT_CHARS`.
+
+**Why 1.0:** these reliability fixes plus the v0.9.x series (clarifier
+context-awareness, query routing, dependency graph, parallel executor scaffold,
+read-loop detection, one-question clarifier) bring SmallCode to a stable
+production baseline. Subsequent releases will be incremental on this base.
+
+Files changed: `bin/executor.js`, `bin/smallcode.js`, `.env.example`
+
+Credit: [@mebassett](https://github.com/mebassett) for the fork that surfaced these issues.
+
+---
+
 ## [0.9.10] - 2026-05-22
 
 ### fix: read-loop detection + one-question clarifier policy
