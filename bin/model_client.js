@@ -32,13 +32,18 @@ async function chatCompletion(ctx) {
       return { ...msg, content: [{ type: 'text', text: msg.content }, ...formatImagesForAPI(images)] };
     });
 
+    const _tools = ctx.getAllTools(config);
     const body = {
       model: config.model.name,
       messages: [systemMsg, ...processedMessages],
-      tools: ctx.getAllTools(config),
       temperature: 0.1,
       max_tokens: 4096,
     };
+    // Only include tools when there are tools to send — some endpoints (OpenWebUI)
+    // error on an empty tools array rather than treating it as "no tools".
+    if (_tools && _tools.length > 0) {
+      body.tools = _tools;
+    }
 
     const headers = buildAuthHeaders(config);
 

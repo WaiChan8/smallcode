@@ -43,8 +43,8 @@ Pre-compiled tarballs for Windows, macOS, and Linux are built on every release â
 
 | Platform | Oneâ€‘line install |
 |---|---|
-| Linux / macOS | `bash <(curl -fsSL https://raw.githubusercontent.com/Doorman11991/smallcode/main/install.sh)` |
-| Windows | `iwr -Uri https://raw.githubusercontent.com/Doorman11991/smallcode/main/install.ps1 -UseBasicParsing \| iex` |
+| Linux / macOS | `bash <(curl -fsSL https://raw.githubusercontent.com/Doorman11991/smallcode/master/install.sh)` |
+| Windows | `iwr -Uri https://raw.githubusercontent.com/Doorman11991/smallcode/master/install.ps1 -UseBasicParsing \| iex` |
 
 The install script downloads the correct tarball for your platform, extracts it to `~/.smallcode`, and adds it to your PATH. Run `smallcode --help` to verify.
 
@@ -354,6 +354,13 @@ SmallCode includes Playwright with stealth mode for undetected web browsing. Dis
 ```bash
 # In your .env
 SMALLCODE_WEB_BROWSE=true
+```
+
+The browser packages are **opt-in peer dependencies** so a default install is light and skips a few deprecated transitives. Install them once when you actually want web browsing:
+
+```bash
+npm install -g playwright-extra puppeteer-extra-plugin-stealth
+npx playwright install chromium
 ```
 
 When enabled, the model can search the web and fetch documentation during tasks. Uses headless Chromium with anti-detection to avoid CAPTCHAs and bot blocks. Falls back to simple HTTP fetch if Playwright isn't available.

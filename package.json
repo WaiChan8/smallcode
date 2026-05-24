@@ -1,6 +1,6 @@
 {
   "name": "smallcode",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "AI coding agent optimized for small LLMs (8B-35B parameters)",
   "main": "src/api/index.js",
   "bin": {
@@ -31,9 +31,15 @@
     "marked-terminal": "7.3.0"
   },
   "optionalDependencies": {
-    "budget-aware-mcp": "0.6.1",
-    "playwright-extra": "4.3.0",
-    "puppeteer-extra-plugin-stealth": "2.11.0"
+    "budget-aware-mcp": "0.6.1"
+  },
+  "peerDependencies": {
+    "playwright-extra": "^4.3.0",
+    "puppeteer-extra-plugin-stealth": "^2.11.0"
+  },
+  "peerDependenciesMeta": {
+    "playwright-extra": { "optional": true },
+    "puppeteer-extra-plugin-stealth": { "optional": true }
   },
   "keywords": [
     "ai",

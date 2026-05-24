@@ -1,5 +1,104 @@
 # Changelog
 
+## [1.2.1] - 2026-05-24
+
+### fix: provider compatibility — 7 bugs causing 400 errors on cloud/local LLMs
+
+Comprehensive audit of LLM API integration surfaced seven genuine bugs that
+would produce silent failures or HTTP 400 errors against specific providers.
+All fixed and tested (83 unit tests + 11 E2E + inline triple-check
+assertions).
+
+- **Bug 1/4 — `model_client.js` always sends `tools: []`** — the module-based
+  `chatCompletion` (used by `features_adapter.js` for MarrowScript cognition
+  calls) unconditionally set `body.tools = ctx.getAllTools(config)`. When
+  `getAllTools` returns `[]` (e.g., `respond` category or 2-stage routing
+  first pass), this sends `"tools": []` which OpenWebUI rejects with a 400.
+  Fixed: guarded with `if (_tools && _tools.length > 0)`, matching the main
+  `chatCompletion` in `bin/smallcode.js`.
+
+- **Bug 2/5 — `thinking_budget.js` injects unknown fields to Ollama/OpenAI** —
+  `body.thinking` was sent to any local server running a reasoning model
+  (qwen3, o3-mini via Ollama). Ollama's `/v1` shim rejects unknown
+  top-level fields. `chat_template_kwargs` and `enable_thinking` are
+  llama.cpp-only; Ollama also rejects them. Fixed: `body.thinking` now
+  ONLY sent to Anthropic; `chat_template_kwargs` only to llama.cpp/LM Studio
+  (detected by excluding known cloud providers AND Ollama port 11434).
+  `reasoning_effort` restricted to OpenAI cloud and OpenRouter only.
+
+- **Bug 3 — `max_tokens` not renamed for OpenAI reasoning models** — OpenAI
+  o1/o3/o4 require `max_completion_tokens`. `max_tokens` is silently ignored,
+  causing potentially truncated output. Fixed: after `applyThinkingBudget`,
+  reasoning models on OpenAI cloud or OpenRouter get
+  `body.max_completion_tokens = body.max_tokens; delete body.max_tokens`.
+
+- **Bug 7 — Auth header priority picks the wrong API key** — `buildAuthHeaders`
+  used a flat fallback chain (`OPENAI_API_KEY || ANTHROPIC_API_KEY ||
+  DEEPSEEK_API_KEY`). If a user had both keys set (common with escalation
+  configured) and their `baseUrl` pointed at DeepSeek, the OpenAI key was
+  sent to DeepSeek → auth failure. Fixed: provider-aware routing based on
+  `baseUrl` — DeepSeek URLs get `DEEPSEEK_API_KEY`, OpenAI gets
+  `OPENAI_API_KEY`, OpenRouter gets `OPENROUTER_API_KEY`, local servers get
+  `SMALLCODE_API_KEY` (new) as first choice. Three inline auth blocks in
+  `bin/smallcode.js` replaced with calls to the centralised
+  `buildAuthHeaders(config)`.
+
+Also fixed three previously untracked issues (#43, #44, #45) — see changelog
+entry above for details.
+
+### Verification
+
+- 83/83 unit tests pass (`npm test`) — 70 prior + 13 new in
+  `test/provider_compat.test.js`
+- 11/11 E2E checks pass (`npm run test:e2e`) against
+  `huihui-gemma-4-e4b-it-abliterated` on `http://10.0.0.20:1234/v1`
+- Inline triple-check assertions for auth routing, thinking-budget
+  isolation (Ollama, OpenAI, LM Studio), and max_completion_tokens rename
+
+---
+
+## [1.2.1] - 2026-05-24
+
+### fix: ollama base URL auto-/v1, install-doc branch, fewer deprecation warnings
+
+Three reported issues closed (#43, #44, #45).
+
+- **Issue #44 — `Cannot reach endpoint at http://localhost:11434`** — Ollama
+  exposes its OpenAI-compatible route at `/v1`, but `bin/config.js` was sending
+  `${baseUrl}/models` against the bare host when `provider=openai` (the
+  default). New `normalizeBaseUrl()` auto-appends `/v1` for known
+  OpenAI-compatible local ports (11434 Ollama, 1234 LM Studio, 8080
+  llama.cpp) when the URL has no path. URLs that already contain `/v1` or
+  `/api/` are left alone so existing setups don't break. The `Cannot reach
+  endpoint` error message now also suggests `${baseUrl}/v1` on a 404 when
+  the URL has no `/v1`.
+- **Issue #45 — README install URLs use `/main`** — both the Linux/macOS and
+  Windows one-liners pointed at `raw.githubusercontent.com/.../main/...`,
+  but the default branch is `master`. Updated both. Reported by @aaronjmars
+  (community fix).
+- **Issue #43 — `npm install -g` deprecation warnings** — moved
+  `playwright-extra` and `puppeteer-extra-plugin-stealth` from
+  `optionalDependencies` to `peerDependencies` with
+  `peerDependenciesMeta.optional`, so a default install no longer pulls
+  the deprecated `rimraf@3 → glob@7 → inflight@1` chain. Users who want
+  web browsing run `npm install -g playwright-extra
+  puppeteer-extra-plugin-stealth` themselves; the lazy-require in
+  `src/tools/builtin/web_browse.js` already falls back to plain `fetch`
+  when they're absent. The remaining `prebuild-install` deprecation comes
+  from `better-sqlite3` (transitive of `budget-aware-mcp`) and is upstream
+  — kept on the optional path since SmallCode falls back to JSON-backed
+  memory when SQLite isn't available.
+
+### Verification
+
+- 6/6 new `normalizeBaseUrl` unit tests in `test/config_normalize.test.js`
+- Existing 60 tests still pass (`npm test`)
+- `npm install -g smallcode@1.2.1 --dry-run` produces 1 warning
+  (`prebuild-install`, transitive of optional `budget-aware-mcp`) instead
+  of 4
+
+---
+
 ## [1.2.0] - 2026-05-23
 
 ### feat: contract / definition-of-done + per-turn idempotent-write dedup + bench diff

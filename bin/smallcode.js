@@ -45,7 +45,7 @@ const readline = require('readline');
 const os = require('os');
 const tui = require('./tui');
 const chalk = tui.chalk;
-const { loadConfig: loadConfigModule, checkEndpoint } = require('./config');
+const { loadConfig: loadConfigModule, checkEndpoint, buildAuthHeaders } = require('./config');
 const { TOOLS, COMPOUND_TOOLS, getAllTools: _getAllToolsModule } = require('./tools');
 const { runValidation: _runValidationModule } = require('./model_client');
 const { mcpCall, initCodeGraph, killMCP, getMcpProcess } = require('./mcp_bridge');
@@ -2103,6 +2103,21 @@ async function chatCompletion(config, messages) {
       applyThinkingBudget(body, { baseUrl });
     } catch {} // optional — fall through if module unavailable
 
+    // Fix #44b: OpenAI reasoning models (o1, o3, o4) require
+    // `max_completion_tokens` instead of `max_tokens`. Sending `max_tokens`
+    // causes it to be silently ignored or produces a deprecation warning.
+    // Only rename the field when targeting OpenAI cloud or OpenRouter.
+    {
+      const _bUrl = (baseUrl || '').toLowerCase();
+      const _isOpenAICloud = _bUrl.includes('api.openai.com') || _bUrl.includes('openrouter.ai');
+      const _modelLower = String(body.model || '').toLowerCase();
+      const _isReasoning = /(^|[\/\-_])(o1|o3|o4)/.test(_modelLower);
+      if (_isOpenAICloud && _isReasoning && body.max_tokens && !body.max_completion_tokens) {
+        body.max_completion_tokens = body.max_tokens;
+        delete body.max_tokens;
+      }
+    }
+
     // Adaptive retry temperature (Feature 12): nudge temperature per attempt.
     // Only count attempts for the CURRENT file being validated (not stale entries
     // from previous files that have already been fixed or reset).
@@ -2118,12 +2133,8 @@ async function chatCompletion(config, messages) {
       }
     } catch {}
 
-    // Build headers — include Authorization if an API key is available
-    const headers = { 'Content-Type': 'application/json' };
-    const apiKey = process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.DEEPSEEK_API_KEY || config.model.apiKey;
-    if (apiKey) {
-      headers['Authorization'] = `Bearer ${apiKey}`;
-    }
+    // Build headers — use provider-aware key routing from config.js
+    const headers = buildAuthHeaders(config);
     // OpenRouter requires HTTP-Referer and X-Title headers
     if (baseUrl.includes('openrouter.ai')) {
       headers['HTTP-Referer'] = 'https://github.com/Doorman11991/smallcode';
@@ -2277,13 +2288,7 @@ async function streamFinalResponse(config, messages) {
   };
 
   try {
-    const headers = { 'Content-Type': 'application/json' };
-    const apiKey = process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.DEEPSEEK_API_KEY || config.model.apiKey;
-    if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
-    if (baseUrl.includes('openrouter.ai')) {
-      headers['HTTP-Referer'] = 'https://github.com/Doorman11991/smallcode';
-      headers['X-Title'] = 'SmallCode';
-    }
+    const headers = buildAuthHeaders(config);
 
     // Fix #3: Only include messages that form valid pairs. Strip tool_call
     // assistant messages that don't have a following tool result (which causes
@@ -2395,13 +2400,7 @@ Rules:
   // OpenAI-compatible (LM Studio, vLLM, etc.)
   if (config.model.provider === 'openai' || baseUrl.includes('/v1')) {
     try {
-      const headers = { 'Content-Type': 'application/json' };
-      const apiKey = process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.DEEPSEEK_API_KEY || config.model.apiKey;
-      if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
-      if (baseUrl.includes('openrouter.ai')) {
-        headers['HTTP-Referer'] = 'https://github.com/Doorman11991/smallcode';
-        headers['X-Title'] = 'SmallCode';
-      }
+      const headers = buildAuthHeaders(config);
 
       const response = await fetch(`${baseUrl}/chat/completions`, {
         method: 'POST',

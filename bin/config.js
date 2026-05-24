@@ -83,7 +83,52 @@ function loadConfig(flags = {}) {
   if (flags.endpoint || flags.baseUrl) config.model.baseUrl = flags.endpoint || flags.baseUrl;
   if (flags.classic) config.tui.classic = true;
 
+  // Normalize the base URL so common Ollama / LM Studio mistakes resolve
+  // automatically. Closes #44 — "ollama Cannot reach endpoint at
+  // http://localhost:11434" — Ollama's OpenAI-compatible endpoint lives at
+  // /v1; the /api/* paths are the legacy Ollama-native API. Setting
+  // SMALLCODE_BASE_URL=http://localhost:11434 used to fail because the
+  // OpenAI-compat path tried .../models instead of .../v1/models.
+  config.model.baseUrl = normalizeBaseUrl(config.model.baseUrl);
+
   return config;
+}
+
+/**
+ * Auto-append `/v1` to known OpenAI-compatible endpoints when the user
+ * didn't include it. Strips trailing slashes. No-op for URLs that already
+ * end in `/v1`, contain `/v1/`, or aren't on a recognised port.
+ *
+ * Examples:
+ *   http://localhost:11434           → http://localhost:11434/v1   (Ollama)
+ *   http://localhost:1234            → http://localhost:1234/v1    (LM Studio)
+ *   http://localhost:8080            → http://localhost:8080       (llama.cpp — left alone)
+ *   http://localhost:11434/v1        → http://localhost:11434/v1   (no-op)
+ *   http://localhost:11434/api/      → http://localhost:11434/api  (trailing slash stripped)
+ */
+function normalizeBaseUrl(url) {
+  if (!url || typeof url !== 'string') return url;
+  let out = url.trim().replace(/\/+$/, '');
+  if (!out) return url;
+  // If it already routes through /v1, leave it alone.
+  if (/\/v1(\/|$)/.test(out)) return out;
+  // Don't touch native-Ollama paths (/api/...) — the caller is intentionally
+  // hitting the legacy API.
+  if (/\/api(\/|$)/.test(out)) return out;
+  // Recognised OpenAI-compatible local server ports that REQUIRE /v1.
+  // (llama.cpp's server defaults to 8080 but its /v1 route is also OpenAI-
+  // compatible, so we append there too — but only when the path is empty.)
+  const known = /:(11434|1234|8080|11435)(\/|$)/;
+  let hasPath = false;
+  try {
+    const u = new URL(out);
+    hasPath = u.pathname && u.pathname !== '/' && u.pathname !== '';
+  } catch {
+    return out;
+  }
+  if (hasPath) return out;
+  if (known.test(out)) return out + '/v1';
+  return out;
 }
 
 /**
@@ -104,7 +149,13 @@ async function checkEndpoint(config) {
       const response = await fetch(`${baseUrl}/models`, { headers });
       if (!response.ok) {
         console.log(`  ⚠ Cannot reach endpoint at ${baseUrl}`);
-        console.log(`  Check that your model server is running and accessible.`);
+        console.log(`  Got HTTP ${response.status} from ${baseUrl}/models`);
+        if (response.status === 404 && !/\/v1(\/|$)/.test(baseUrl)) {
+          // The most common cause: user gave a base URL without /v1.
+          console.log(`  Tip: this URL has no /v1 path. Try SMALLCODE_BASE_URL=${baseUrl}/v1 in your .env.`);
+        } else {
+          console.log(`  Check that your model server is running and accessible.`);
+        }
         if (response.status === 401 || response.status === 403) {
           console.log(`  Got ${response.status} — set OPENAI_API_KEY in .env if your server requires auth.`);
         }
@@ -151,18 +202,42 @@ async function checkEndpoint(config) {
 
 /**
  * Build auth headers for API requests.
+ *
+ * Provider-aware: picks the right API key based on the target URL, so users
+ * with multiple keys configured (common when escalation is enabled) don't
+ * accidentally send an OpenAI key to DeepSeek or vice versa.
  */
 function buildAuthHeaders(config) {
   const headers = { 'Content-Type': 'application/json' };
-  const apiKey = process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.DEEPSEEK_API_KEY || config.model.apiKey;
+  const baseUrl = (config.model.baseUrl || '').toLowerCase();
+
+  // Route key selection based on the target endpoint URL.
+  let apiKey = null;
+  if (baseUrl.includes('api.deepseek.com')) {
+    apiKey = process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY || config.model.apiKey;
+  } else if (baseUrl.includes('api.openai.com')) {
+    apiKey = process.env.OPENAI_API_KEY || config.model.apiKey;
+  } else if (baseUrl.includes('openrouter.ai')) {
+    apiKey = process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY || config.model.apiKey;
+  } else if (baseUrl.includes('anthropic.com')) {
+    // Anthropic uses x-api-key, not Bearer — but if someone routes through
+    // an OpenAI-compat proxy, Bearer still works. We use ANTHROPIC_API_KEY
+    // first, then fall back to the generic key.
+    apiKey = process.env.ANTHROPIC_API_KEY || config.model.apiKey;
+  } else {
+    // Local server or unknown cloud — fall back to any available key.
+    // SMALLCODE_API_KEY is the explicit "my endpoint needs this key" option.
+    apiKey = process.env.SMALLCODE_API_KEY || process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.DEEPSEEK_API_KEY || config.model.apiKey;
+  }
+
   if (apiKey) {
     headers['Authorization'] = `Bearer ${apiKey}`;
   }
-  if (config.model.baseUrl && config.model.baseUrl.includes('openrouter.ai')) {
+  if (baseUrl.includes('openrouter.ai')) {
     headers['HTTP-Referer'] = 'https://github.com/Doorman11991/smallcode';
     headers['X-Title'] = 'SmallCode';
   }
   return headers;
 }
 
-module.exports = { loadConfig, checkEndpoint, buildAuthHeaders };
+module.exports = { loadConfig, checkEndpoint, buildAuthHeaders, normalizeBaseUrl };

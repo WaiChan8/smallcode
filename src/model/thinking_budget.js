@@ -65,33 +65,35 @@ function applyThinkingBudget(body, options = {}) {
 
   // Detect provider from URL so we only send fields that provider accepts.
   // OpenAI's production API rejects unknown top-level parameters with HTTP 400.
-  // LM Studio accepts unknown fields silently but logs warnings about
-  // "No valid custom reasoning fields" if reasoning_effort is sent for a model
-  // that doesn't support it — wasting cycles on translation attempts.
+  // Ollama's /v1 shim also rejects unknown fields like `thinking`, `chat_template_kwargs`.
+  // LM Studio accepts unknown fields silently but logs warnings.
   const isOpenAICloud = baseUrl.includes('api.openai.com') || baseUrl.includes('openrouter.ai');
   const isAnthropic = baseUrl.includes('anthropic.com') || baseUrl.includes('claude');
-  // LM Studio defaults to localhost:1234, often exposed on LAN as 192.168.x.x or 10.x.x.x
-  // We can't reliably distinguish LM Studio from raw llama.cpp, so we use the
-  // model name as a stronger signal for whether reasoning fields are appropriate.
-  const isLocalLlamaCpp = !isOpenAICloud && !isAnthropic;
+  const isDeepSeek = baseUrl.includes('api.deepseek.com');
+  // Ollama runs on port 11434 by default. Its /v1 endpoint is an OpenAI shim
+  // that rejects unknown top-level fields (thinking, chat_template_kwargs, etc).
+  const isOllama = baseUrl.includes(':11434') || baseUrl.includes('ollama');
+  // llama.cpp / LM Studio — only these accept chat_template_kwargs and
+  // enable_thinking. We detect them by exclusion: not a cloud provider,
+  // not Ollama, not DeepSeek.
+  const isLocalLlamaCpp = !isOpenAICloud && !isAnthropic && !isDeepSeek && !isOllama;
 
   // Anthropic-style: { thinking: { type: "enabled", budget_tokens: N } }
-  // Send to: Anthropic itself (where it's the actual API) or local reasoning models.
-  // Skip for non-reasoning local models — LM Studio logs warnings about
-  // "no valid custom reasoning fields" otherwise, and the model can't use it anyway.
-  if (isAnthropic || (isLocalLlamaCpp && /(o1|o3|qwen3|qwq|deepseek-r|claude-3-7|claude-4)/.test(String(body.model || '').toLowerCase()))) {
+  // ONLY send to actual Anthropic API. Local servers and Ollama reject this.
+  // LM Studio technically ignores it silently, but there's no benefit in
+  // sending it to anything other than Anthropic.
+  if (isAnthropic) {
     body.thinking = opts.disable
       ? { type: 'disabled' }
       : { type: 'enabled', budget_tokens: Math.max(0, tokens) };
   }
 
-  // OpenAI o1/o3-style reasoning_effort — only for actual reasoning models.
-  // GPT-5.5, gpt-4o, and most local models do NOT support it. LM Studio logs
-  // warnings when we send it to a non-reasoning model. Only send when the
-  // model name strongly suggests it's a reasoning variant.
+  // OpenAI o1/o3/o4-style reasoning_effort — only send to OpenAI cloud or
+  // OpenRouter (which proxies to OpenAI). Other providers reject it with 400.
+  // GPT-5.5, gpt-4o, and most local models do NOT support it.
   const modelName = String(body.model || '').toLowerCase();
   const isReasoningModel = /(^|[\/\-_])(o1|o3|o4|qwen3|qwq|deepseek-r|deepseek-v3-reason|claude-3-7|claude-4)/.test(modelName);
-  if (isReasoningModel) {
+  if (isReasoningModel && isOpenAICloud) {
     if (!opts.disable) {
       if (tokens <= 500) body.reasoning_effort = 'low';
       else if (tokens <= 3000) body.reasoning_effort = 'medium';
@@ -101,8 +103,9 @@ function applyThinkingBudget(body, options = {}) {
     }
   }
 
-  // Qwen/llama.cpp-style fields — local only, never send to OpenAI/Anthropic cloud.
-  // Only send when model name suggests it actually understands these fields.
+  // Qwen/llama.cpp-style fields — ONLY for llama.cpp and LM Studio.
+  // Never send to OpenAI, Anthropic, DeepSeek cloud, or Ollama.
+  // Ollama has its own /api/chat params; its /v1 shim rejects these.
   if (isLocalLlamaCpp && isReasoningModel) {
     body.chat_template_kwargs = body.chat_template_kwargs || {};
     body.chat_template_kwargs.enable_thinking = !opts.disable;
