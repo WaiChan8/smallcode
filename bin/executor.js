@@ -672,6 +672,81 @@ async function executeTool(name, args, ctx) {
       }
     }
 
+    case 'run_tests': {
+      const { runTests, formatResult } = require('../src/tools/run_tests');
+      const { getTDDGovernor } = require('../src/governor/tdd_governor');
+      const testOpts = { workdir: cwd, timeout: 120000 };
+      if (args.test_filter) testOpts.test_filter = args.test_filter;
+      const testResult = runTests(testOpts);
+      // Drive TDD phase transitions automatically
+      let tddMessage = null;
+      try {
+        const gov = getTDDGovernor({ workdir: cwd });
+        tddMessage = gov.processTestResult(testResult);
+      } catch {}
+      const formatted = formatResult(testResult);
+      return { result: tddMessage ? `${formatted}\n\n[TDD] ${tddMessage}` : formatted, testResult };
+    }
+
+    case 'tdd_begin_cycle': {
+      const { getTDDState } = require('../src/session/tdd_state');
+      const tdd = getTDDState({ workdir: cwd });
+      const r = tdd.beginCycle(args.test_name || '');
+      return { result: r.message };
+    }
+
+    case 'tdd_status': {
+      const { getTDDState, PHASES } = require('../src/session/tdd_state');
+      const tdd = getTDDState({ workdir: cwd });
+      if (tdd.isIdle()) return { result: 'TDD phase: idle — no active cycle. Call tdd_begin_cycle to start.' };
+      const confirmed = tdd.phase === PHASES.RED ? (tdd.redConfirmed ? ' (red confirmed)' : ' (awaiting red confirmation)') : '';
+      const lines = [
+        `TDD phase: ${tdd.phase}${confirmed}`,
+        `Target test: ${tdd.targetTest}`,
+        tdd.phasePrompt().trim(),
+      ];
+      return { result: lines.filter(Boolean).join('\n') };
+    }
+
+    case 'tdd_advance': {
+      const { getTDDState } = require('../src/session/tdd_state');
+      const { runTests } = require('../src/tools/run_tests');
+      const tdd = getTDDState({ workdir: cwd });
+      if (tdd.isIdle()) return { result: 'No active TDD cycle. Call tdd_begin_cycle first.' };
+
+      if (tdd.phase === 'red') {
+        if (!tdd.redConfirmed) return { result: 'RED phase: call run_tests first to confirm the target test is failing, then call tdd_advance.' };
+        // Try to advance to green — run tests to check
+        const tr = runTests({ workdir: cwd });
+        const r = tdd.advanceToGreen(tr);
+        return { result: r.message };
+      }
+
+      if (tdd.phase === 'green') {
+        if (args.skip_refactor) {
+          const r = tdd.skipRefactor();
+          return { result: r.message };
+        }
+        const r = tdd.enterRefactor();
+        return { result: r.message };
+      }
+
+      if (tdd.phase === 'refactor') {
+        const tr = runTests({ workdir: cwd });
+        const r = tdd.completeCycle(tr);
+        return { result: r.message };
+      }
+
+      return { result: `Unexpected TDD phase: ${tdd.phase}` };
+    }
+
+    case 'tdd_reset': {
+      const { getTDDState } = require('../src/session/tdd_state');
+      const tdd = getTDDState({ workdir: cwd });
+      const r = tdd.reset();
+      return { result: r.message };
+    }
+
     case 'memory_load':
     case 'memory_remember':
     case 'memory_list':

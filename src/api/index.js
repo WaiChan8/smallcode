@@ -19,6 +19,7 @@ const {
   safeResolvePath,
   sanitizeToolOutput,
 } = require('../security/sanitize');
+const { getTDDGovernor } = require('../governor/tdd_governor');
 
 class SmallCode extends EventEmitter {
   constructor(config = {}) {
@@ -106,6 +107,18 @@ class SmallCode extends EventEmitter {
             this.emit('tool_start', { name: toolName, args: toolArgs });
             const toolStart = Date.now();
 
+            // TDD phase gate: block writes that violate the current phase
+            const tddGate = getTDDGovernor({ workdir: this.config.cwd }).checkToolCall(toolName, toolArgs);
+            if (tddGate) {
+              messages.push({
+                role: 'tool',
+                tool_call_id: tc.id,
+                content: tddGate,
+              });
+              result.toolCalls.push({ name: toolName, args: toolArgs, result: tddGate, error: null, durationMs: 0 });
+              continue;
+            }
+
             const toolResult = await this._executeTool(toolName, toolArgs);
             const toolMs = Date.now() - toolStart;
 
@@ -170,11 +183,12 @@ class SmallCode extends EventEmitter {
   // ─── Internal ──────────────────────────────────────────────────────────
 
   _buildSystemPrompt() {
+    const tddPhase = getTDDGovernor({ workdir: this.config.cwd }).phasePrompt();
     return `You are SmallCode, a coding assistant. You have tools to read, write, and edit files, run shell commands, and search code.
 Rules:
 - Use patch for edits (search-and-replace). Do NOT rewrite whole files.
 - Be concise — show what you did, not lengthy explanations.
-- Working directory: ${this.config.cwd}`;
+- Working directory: ${this.config.cwd}${tddPhase}`;
   }
 
   async _chatCompletion(messages) {
@@ -223,6 +237,11 @@ Rules:
       { type: 'function', function: { name: 'bash', description: 'Run a shell command. Returns stdout/stderr.', parameters: { type: 'object', properties: { command: { type: 'string', description: 'Shell command' } }, required: ['command'] } } },
       { type: 'function', function: { name: 'search', description: 'Search file contents using regex. Returns matching lines.', parameters: { type: 'object', properties: { pattern: { type: 'string', description: 'Regex pattern' } }, required: ['pattern'] } } },
       { type: 'function', function: { name: 'find_files', description: 'Find files matching a glob pattern.', parameters: { type: 'object', properties: { pattern: { type: 'string', description: 'Glob pattern' } }, required: ['pattern'] } } },
+      { type: 'function', function: { name: 'run_tests', description: 'Run the project\'s test suite and return structured results: pass/fail counts and per-failing-test names and messages.', parameters: { type: 'object', properties: { test_filter: { type: 'string', description: 'Optional: run only tests matching this pattern.' } }, required: [] } } },
+      { type: 'function', function: { name: 'tdd_begin_cycle', description: 'Start a TDD cycle for a named test, entering the RED phase.', parameters: { type: 'object', properties: { test_name: { type: 'string', description: 'Test identifier to track.' } }, required: ['test_name'] } } },
+      { type: 'function', function: { name: 'tdd_status', description: 'Show current TDD phase and target test.', parameters: { type: 'object', properties: {}, required: [] } } },
+      { type: 'function', function: { name: 'tdd_advance', description: 'Advance the TDD cycle to the next phase.', parameters: { type: 'object', properties: { skip_refactor: { type: 'boolean' } }, required: [] } } },
+      { type: 'function', function: { name: 'tdd_reset', description: 'Reset TDD state to idle.', parameters: { type: 'object', properties: {}, required: [] } } },
     ];
 
     if (this.config.tools) {
@@ -311,6 +330,62 @@ Rules:
         } catch {
           return { result: 'No files found.' };
         }
+      }
+
+      case 'run_tests': {
+        const { runTests, formatResult } = require('../tools/run_tests');
+        const { getTDDGovernor } = require('../governor/tdd_governor');
+        const testOpts = { workdir: cwd, timeout: 120000 };
+        if (args.test_filter) testOpts.test_filter = args.test_filter;
+        const testResult = runTests(testOpts);
+        let tddMessage = null;
+        try {
+          const gov = getTDDGovernor({ workdir: cwd });
+          tddMessage = gov.processTestResult(testResult);
+        } catch {}
+        const formatted = formatResult(testResult);
+        return { result: tddMessage ? `${formatted}\n\n[TDD] ${tddMessage}` : formatted };
+      }
+
+      case 'tdd_begin_cycle': {
+        const { getTDDState } = require('../session/tdd_state');
+        const r = getTDDState({ workdir: cwd }).beginCycle(args.test_name || '');
+        return { result: r.message };
+      }
+
+      case 'tdd_status': {
+        const { getTDDState, PHASES } = require('../session/tdd_state');
+        const tdd = getTDDState({ workdir: cwd });
+        if (tdd.isIdle()) return { result: 'TDD phase: idle — no active cycle.' };
+        const confirmed = tdd.phase === PHASES.RED ? (tdd.redConfirmed ? ' (confirmed)' : ' (unconfirmed)') : '';
+        return { result: `TDD phase: ${tdd.phase}${confirmed}\nTarget: ${tdd.targetTest}\n${tdd.phasePrompt().trim()}` };
+      }
+
+      case 'tdd_advance': {
+        const { getTDDState } = require('../session/tdd_state');
+        const { runTests } = require('../tools/run_tests');
+        const tdd = getTDDState({ workdir: cwd });
+        if (tdd.isIdle()) return { result: 'No active TDD cycle. Call tdd_begin_cycle first.' };
+        if (tdd.phase === 'red') {
+          if (!tdd.redConfirmed) return { result: 'Call run_tests first to confirm the test is failing.' };
+          const r = tdd.advanceToGreen(runTests({ workdir: cwd }));
+          return { result: r.message };
+        }
+        if (tdd.phase === 'green') {
+          const r = args.skip_refactor ? tdd.skipRefactor() : tdd.enterRefactor();
+          return { result: r.message };
+        }
+        if (tdd.phase === 'refactor') {
+          const r = tdd.completeCycle(runTests({ workdir: cwd }));
+          return { result: r.message };
+        }
+        return { result: `Unexpected TDD phase: ${tdd.phase}` };
+      }
+
+      case 'tdd_reset': {
+        const { getTDDState } = require('../session/tdd_state');
+        const r = getTDDState({ workdir: cwd }).reset();
+        return { result: r.message };
       }
 
       default:
