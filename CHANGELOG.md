@@ -1,6 +1,16 @@
 # Changelog
 
-## [1.3.1] - 2026-05-29
+## [1.4.0] - 2026-05-29
+
+### feat: RAG coding harness with Python scraper + hybrid search (#64)
+
+Adds an opt-in retrieval harness that scrapes snippet-sized code chunks
+from curated repositories and serves them via hybrid (keyword + vector)
+search. New surface: `bin/rag-index.js` + `smallcode-rag-index` bin and
+the `rag:index` npm script (builds `.smallcode/rag/index.json` from chunks
+scraped by `scripts/rag_scraper.py`), `src/rag/` (`index_store.js`,
+`retriever.js`, `curated_repos.json`), docs in `docs/rag-harness.md`, and
+`test/rag.test.js`. No new npm dependencies — the scraper runs via Python.
 
 ### fix: strict chat templates reject mid-conversation system messages (#62)
 
@@ -23,6 +33,8 @@ at positions other than 0.
   them. Verified end-to-end against a Qwen3 model: every tool-bearing
   request now carries exactly one system message at index 0.
 - Test coverage: `test/message_normalizer.test.js` (9 cases).
+
+## [1.3.1] - 2026-05-29
 
 ### fix: compatibility issues #57, #58, #59
 
