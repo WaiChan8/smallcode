@@ -98,3 +98,50 @@ test('handles only-system input (collapses to one)', () => {
 test('empty array is a no-op', () => {
   assert.deepEqual(consolidateSystemMessages([]), []);
 });
+
+
+// ─── Issue #49: recover a final answer from reasoning_content ───────────────
+
+const { recoverReasoningAnswer } = require('../src/session/message_normalizer');
+
+test('promotes reasoning_content to content when content is empty and no tool calls', () => {
+  const msg = { role: 'assistant', content: '', reasoning_content: 'Here are the bugs I found: ...' };
+  const promoted = recoverReasoningAnswer(msg);
+  assert.equal(promoted, true);
+  assert.equal(msg.content, 'Here are the bugs I found: ...');
+});
+
+test('does not touch content when it is already non-empty', () => {
+  const msg = { role: 'assistant', content: 'real answer', reasoning_content: 'thinking...' };
+  const promoted = recoverReasoningAnswer(msg);
+  assert.equal(promoted, false);
+  assert.equal(msg.content, 'real answer');
+});
+
+test('does not promote when there are tool calls', () => {
+  const msg = {
+    role: 'assistant',
+    content: '',
+    reasoning_content: 'I will read the file',
+    tool_calls: [{ id: '1', type: 'function', function: { name: 'read_file', arguments: '{}' } }],
+  };
+  const promoted = recoverReasoningAnswer(msg);
+  assert.equal(promoted, false);
+  assert.equal(msg.content, '');
+});
+
+test('no-op when reasoning_content is empty/whitespace', () => {
+  const msg = { role: 'assistant', content: '', reasoning_content: '   ' };
+  assert.equal(recoverReasoningAnswer(msg), false);
+});
+
+test('no-op when reasoning_content is absent', () => {
+  const msg = { role: 'assistant', content: '' };
+  assert.equal(recoverReasoningAnswer(msg), false);
+});
+
+test('handles null/garbage input safely', () => {
+  assert.equal(recoverReasoningAnswer(null), false);
+  assert.equal(recoverReasoningAnswer(undefined), false);
+  assert.equal(recoverReasoningAnswer({}), false);
+});

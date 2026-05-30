@@ -72,4 +72,31 @@ function consolidateSystemMessages(messages) {
   return [merged, ...rest];
 }
 
-module.exports = { consolidateSystemMessages };
+/**
+ * Recover a final answer that a reasoning model placed in `reasoning_content`
+ * while leaving `content` empty (issue #49). Some servers — vLLM with
+ * `--reasoning-parser qwen3`, DeepSeek R1, and other reasoning models — emit
+ * the model's final prose answer in the `reasoning_content` channel and leave
+ * `content` empty when there is no tool call. The agent loop would otherwise
+ * see an empty turn and exit with no output.
+ *
+ * Mutates `message` in place: when it has no tool calls, an empty `content`,
+ * and a non-empty `reasoning_content`, the reasoning text is promoted to
+ * `content`. Returns true if a promotion happened, false otherwise.
+ *
+ * @param {object} message  OpenAI-style assistant message.
+ * @returns {boolean}
+ */
+function recoverReasoningAnswer(message) {
+  if (!message || typeof message !== 'object') return false;
+  const hasToolCalls = Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
+  if (hasToolCalls) return false;
+  const contentEmpty = !(typeof message.content === 'string' && message.content.trim());
+  if (!contentEmpty) return false;
+  const reasoning = typeof message.reasoning_content === 'string' ? message.reasoning_content.trim() : '';
+  if (!reasoning) return false;
+  message.content = reasoning;
+  return true;
+}
+
+module.exports = { consolidateSystemMessages, recoverReasoningAnswer };
