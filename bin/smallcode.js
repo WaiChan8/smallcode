@@ -90,7 +90,7 @@ const { PluginLoader } = require('../src/plugins/loader');
 const { SkillManager } = require('../src/plugins/skills');
 const { SessionStore } = require('../src/session/persistence');
 const { resolveReferences, formatReferencesForPrompt } = require('../src/session/references');
-const { consolidateSystemMessages } = require('../src/session/message_normalizer');
+const { consolidateSystemMessages, recoverReasoningAnswer } = require('../src/session/message_normalizer');
 const { TokenTracker } = require('../src/session/tokens');
 const { UndoStack } = require('../src/session/undo');
 const { shouldInjectGitContext, getGitDiffContext } = require('../src/session/git_context');
@@ -995,6 +995,22 @@ async function runAgentLoop(userMessage, config) {
       const r = extractFromMessage(message, getAllTools(config, currentToolCategory));
       if (r.patched && _fullscreenRef) {
         _fullscreenRef.addTool('tool_call', 'ok', `recovered ${r.addedCalls} from text content`);
+      }
+    } catch {}
+
+    // Reasoning-channel answer recovery (issue #49). Some servers — vLLM with
+    // `--reasoning-parser qwen3`, DeepSeek R1, and other reasoning models —
+    // put the model's FINAL answer in `reasoning_content` and leave `content`
+    // empty when finish_reason is `stop` (no tool call to extract). Without
+    // this, the agent loop sees an empty turn after a few read_file calls and
+    // exits with no output ("No output!"). If there's no tool call and content
+    // is empty but reasoning_content has text, promote it to content so the
+    // normal final-answer rendering path surfaces it. Disable with
+    // SMALLCODE_REASONING_FALLBACK=false.
+    try {
+      const fallbackDisabled = String(process.env.SMALLCODE_REASONING_FALLBACK || 'true').toLowerCase() === 'false';
+      if (!fallbackDisabled && recoverReasoningAnswer(message)) {
+        if (_fullscreenRef) _fullscreenRef.addTool('reasoning', 'ok', 'recovered answer from reasoning_content');
       }
     } catch {}
 

@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.5.1] - 2026-05-29
+
+### fix: surface final answers stuck in reasoning_content (#49)
+
+Reasoning models served with a split reasoning channel — vLLM with
+`--reasoning-parser qwen3`, DeepSeek R1, and qwen3.x family — sometimes
+return their final answer in `reasoning_content` with an empty `content`
+and `finish_reason: stop` (no tool call). The agent loop saw an empty turn
+after its read/tool calls and exited with no visible output ("No output!"),
+even though the server logs showed the model generating tokens the whole
+time.
+
+- New `src/session/message_normalizer.js#recoverReasoningAnswer()` promotes
+  `reasoning_content` to `content` when there's no tool call and `content`
+  is empty, so the normal final-answer rendering path surfaces it.
+- Wired into the agent loop (`bin/smallcode.js`) right after tool-call
+  recovery. Opt-out via `SMALLCODE_REASONING_FALLBACK=false`.
+- Verified: deterministic recovery of the exact issue #49 wire shape, plus
+  a full agent run against a qwen3.6-35b reasoning model producing correct,
+  visible output with no regression on healthy (content-populated) turns.
+- Test coverage: 6 new cases in `test/message_normalizer.test.js`.
+
 ## [1.5.0] - 2026-05-29
 
 ### feat: TDD harness — Red→Green→Refactor state machine (#68)
