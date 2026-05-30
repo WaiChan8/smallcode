@@ -672,6 +672,114 @@ async function executeTool(name, args, ctx) {
       }
     }
 
+    case 'run_tests': {
+      const { runTests, formatResult } = require('../src/tools/run_tests');
+      const { getTDDGovernor } = require('../src/governor/tdd_governor');
+      const testOpts = { workdir: cwd, timeout: 120000 };
+      if (args.test_filter) testOpts.test_filter = args.test_filter;
+      const testResult = runTests(testOpts);
+      // Drive TDD phase transitions automatically
+      let tddMessage = null;
+      try {
+        const gov = getTDDGovernor({ workdir: cwd });
+        tddMessage = gov.processTestResult(testResult);
+      } catch {}
+      const formatted = formatResult(testResult);
+      return { result: tddMessage ? `${formatted}\n\n[TDD] ${tddMessage}` : formatted, testResult };
+    }
+
+    case 'tdd_loop': {
+      const { getTDDState } = require('../src/session/tdd_state');
+      const { resetTDDGovernor } = require('../src/governor/tdd_governor');
+      const tdd = getTDDState({ workdir: cwd });
+      // Fresh loop — reset governor singleton so it picks up the new state
+      resetTDDGovernor();
+      const reqs = Array.isArray(args.requirements) ? args.requirements : [];
+      const r = tdd.initRequirements(reqs);
+      return { result: r.ok ? r.message : `tdd_loop error: ${r.message}` };
+    }
+
+    case 'tdd_begin_cycle': {
+      const { getTDDState } = require('../src/session/tdd_state');
+      const tdd = getTDDState({ workdir: cwd });
+      const r = tdd.beginCycle(args.test_name || '');
+      return { result: r.message };
+    }
+
+    case 'tdd_status': {
+      const { getTDDState, PHASES } = require('../src/session/tdd_state');
+      const tdd = getTDDState({ workdir: cwd });
+      const lines = [];
+
+      if (tdd.loopActive && tdd.requirements.length > 0) {
+        const done = tdd.doneRequirements().length;
+        const total = tdd.requirements.length;
+        lines.push(`TDD Loop: ${done}/${total} requirements done${tdd.loopComplete() ? ' ✓ COMPLETE' : ''}`);
+        lines.push('Requirements:');
+        for (const r of tdd.requirements) {
+          const mark = r.status === 'done' ? '✓' : r.status === 'active' ? '→' : '○';
+          lines.push(`  ${mark} ${r.id}: ${r.text}`);
+        }
+        lines.push('');
+      }
+
+      if (tdd.isIdle() && !tdd.loopActive) {
+        return { result: 'TDD: idle — no active cycle. Call tdd_loop or tdd_begin_cycle to start.' };
+      }
+
+      if (!tdd.isIdle()) {
+        const confirmed = tdd.phase === PHASES.RED
+          ? (tdd.redConfirmed ? ' (red confirmed)' : ' (awaiting red confirmation)')
+          : '';
+        lines.push(`Phase: ${tdd.phase}${confirmed}`);
+        if (tdd.targetTest) lines.push(`Target test: ${tdd.targetTest}`);
+      }
+
+      const prompt = tdd.phasePrompt().trim();
+      if (prompt) lines.push('', prompt);
+
+      return { result: lines.join('\n') };
+    }
+
+    case 'tdd_advance': {
+      const { getTDDState } = require('../src/session/tdd_state');
+      const { runTests } = require('../src/tools/run_tests');
+      const tdd = getTDDState({ workdir: cwd });
+      if (tdd.isIdle()) return { result: 'No active TDD cycle. Call tdd_begin_cycle first.' };
+
+      if (tdd.phase === 'red') {
+        if (!tdd.redConfirmed) return { result: 'RED phase: call run_tests first to confirm the target test is failing, then call tdd_advance.' };
+        // Try to advance to green — run tests to check
+        const tr = runTests({ workdir: cwd });
+        const r = tdd.advanceToGreen(tr);
+        return { result: r.message };
+      }
+
+      if (tdd.phase === 'green') {
+        if (args.skip_refactor) {
+          const r = tdd.skipRefactor();
+          return { result: r.message };
+        }
+        const r = tdd.enterRefactor();
+        return { result: r.message };
+      }
+
+      if (tdd.phase === 'refactor') {
+        const tr = runTests({ workdir: cwd });
+        const r = tdd.completeCycle(tr);
+        return { result: r.message };
+      }
+
+      return { result: `Unexpected TDD phase: ${tdd.phase}` };
+    }
+
+    case 'tdd_reset': {
+      const { getTDDState } = require('../src/session/tdd_state');
+      const tdd = getTDDState({ workdir: cwd });
+      const r = tdd.reset();
+      return { result: r.message };
+    }
+
     case 'memory_load':
     case 'memory_remember':
     case 'memory_list':
@@ -837,4 +945,62 @@ async function executeTool(name, args, ctx) {
   }
 }
 
-module.exports = { executeTool };
+// ─── TDD harness post-write hook ─────────────────────────────────────────────
+//
+// Called after every successful file write while a TDD loop is active.
+// Runs run_tests automatically (filtered to target test when in RED/GREEN,
+// full suite in REFACTOR or when all requirements are done) and drives
+// phase transitions without requiring the model to call any TDD tools.
+//
+// Also auto-begins a cycle when: loop active + idle + test file written +
+// tests are newly failing. This means the model never needs to call
+// tdd_begin_cycle explicitly.
+
+async function _tddPostWrite(filePath, toolResult, cwd) {
+  try {
+    const { getTDDState, _isTestFile } = require('../src/session/tdd_state');
+    const tdd = getTDDState({ workdir: cwd });
+    if (!tdd.loopActive) return toolResult;
+
+    const { runTests, formatResult } = require('../src/tools/run_tests');
+    const { getTDDGovernor } = require('../src/governor/tdd_governor');
+
+    const isTestFile = _isTestFile(filePath || '');
+    const isRefactor = tdd.isRefactor();
+    const allDone = tdd.allRequirementsDone();
+
+    // Choose filter: target test while in cycle, full suite for refactor/done
+    const filter = (!isRefactor && !allDone && tdd.targetTest) ? tdd.targetTest : null;
+    const testResult = runTests({ workdir: cwd, test_filter: filter || undefined });
+
+    // Auto-begin cycle: idle + test file written + failures detected
+    if (tdd.isIdle() && isTestFile && (testResult.failed > 0 || testResult.errors > 0)) {
+      const inferredName = (testResult.failures[0] && testResult.failures[0].name) || 'new test';
+      tdd.beginCycle(inferredName);
+      // Re-run processTestResult so confirmRed fires on this same result
+    }
+
+    const gov = getTDDGovernor({ workdir: cwd });
+    const tddMsg = gov.processTestResult(testResult);
+
+    const testSummary = `\n\n[harness] run_tests: ${testResult.summary}${tddMsg ? '\n[TDD] ' + tddMsg : ''}`;
+    return { ...toolResult, result: (toolResult.result || '') + testSummary };
+  } catch {
+    return toolResult; // never fail the write because of TDD auto-check
+  }
+}
+
+// Wrap executeTool so the TDD post-write hook fires automatically.
+// This keeps the hook out of every individual tool case.
+const _executeToolRaw = executeTool;
+async function executeToolWithTDD(name, args, ctx) {
+  const result = await _executeToolRaw(name, args, ctx);
+  const WRITE_TOOLS = new Set(['write_file', 'patch', 'append_file', 'read_and_patch']);
+  if (WRITE_TOOLS.has(name) && result && !result.error) {
+    const filePath = args && (args.path || '');
+    return _tddPostWrite(filePath, result, process.cwd());
+  }
+  return result;
+}
+
+module.exports = { executeTool: executeToolWithTDD };
