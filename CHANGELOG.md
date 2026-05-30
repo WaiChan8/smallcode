@@ -1,5 +1,28 @@
 # Changelog
 
+## [Unreleased]
+
+### fix: restore terminal on suspend, termination, and crashes (#71)
+
+The fullscreen TUI enabled raw mode + SGR mouse tracking (`\x1b[?1000h`,
+`\x1b[?1006h`) and bracketed paste (`\x1b[?2004h`), but only restored them in
+`leave()` — which ran solely on a normal `Ctrl+C` / `Ctrl+D` / `/quit` exit.
+Suspending with `Ctrl+Z` (`suspended (tty input)`), termination, or a crash left
+the terminal in raw/mouse mode, so the shell echoed leaked SGR mouse reports like
+`0;66;42M` with an invisible cursor.
+
+- New module `src/tui/terminal.js` (`TerminalController`) centralizes
+  alternate-buffer / raw-mode / mouse / bracketed-paste setup and **guarantees**
+  teardown on every exit path: `exit`, `uncaughtException`, `SIGTERM`/`SIGHUP`,
+  and the job-control stop signals `SIGTSTP`/`SIGTTIN`/`SIGTTOU`.
+- `Ctrl+Z` now suspends cleanly: the terminal is restored *before* the process
+  stops, and `SIGCONT` (`fg`) re-enters TUI mode and redraws.
+- `src/tui/fullscreen.js` delegates its `enter()`/`leave()` to the controller
+  (also trims duplicated inline escape sequences from the 943-line file).
+- Test coverage: `test/terminal_lifecycle.test.js` (9 cases) verifies restoration
+  on suspend/resume, terminate, and crash paths, plus no listener leaks. Full
+  suite: 290 passing.
+
 ## [1.5.0] - 2026-05-29
 
 ### feat: TDD harness — Red→Green→Refactor state machine (#68)

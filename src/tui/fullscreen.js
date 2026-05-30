@@ -10,6 +10,7 @@
 // 5. On exit, restore the original terminal (\x1b[?1049l)
 
 const readline = require('readline');
+const { TerminalController } = require('./terminal.js');
 
 // ─── Visual Width Helpers ─────────────────────────────────────────────────────
 // CJK and fullwidth characters occupy 2 columns in the terminal, not 1.
@@ -255,13 +256,18 @@ class FullScreenTUI {
   enter() {
     this.active = true;
 
-    // Store a direct reference to the real stdout.write (before any overrides)
-    this._rawWrite = process.stdout.write.bind(process.stdout);
+    // The TerminalController owns alt-buffer / raw-mode / mouse-tracking /
+    // bracketed-paste setup and — critically — guarantees teardown on suspend
+    // (Ctrl+Z), termination, and crashes (issue #71). On resume it redraws.
+    if (!this._terminal) {
+      this._terminal = new TerminalController({
+        onResume: () => { this._computeLayout(); this.render(); },
+      });
+    }
+    this._terminal.enter();
 
-    // Enter alternate buffer + raw mode + mouse tracking (hold Shift to select text) + SGR encoding + bracketed paste
-    this._rawWrite(ANSI.enterAlt + ANSI.hideCursor + '\x1b[?1000h' + '\x1b[?1006h' + '\x1b[?2004h');
-    process.stdin.setRawMode(true);
-    process.stdin.resume();
+    // Store a direct reference to the real stdout.write (before any overrides)
+    this._rawWrite = this._terminal.rawWrite;
 
     // Handle resize
     process.stdout.on('resize', () => this._onResize());
@@ -274,11 +280,9 @@ class FullScreenTUI {
   }
 
   leave() {
+    if (!this.active) return;
     this.active = false;
-    const write = this._rawWrite || process.stdout.write.bind(process.stdout);
-    write(ANSI.showCursor + '\x1b[?1000l' + '\x1b[?1006l' + '\x1b[?2004l' + ANSI.leaveAlt + ANSI.reset);
-    process.stdin.setRawMode(false);
-    process.stdin.pause();
+    if (this._terminal) this._terminal.leave();
   }
 
   // ─── Layout ──────────────────────────────────────────────────────────
@@ -656,6 +660,15 @@ class FullScreenTUI {
     if (key === '\x04') {
       this.leave();
       this.onExit();
+      return;
+    }
+
+    // Ctrl+Z — suspend cleanly. In raw mode the kernel delivers Ctrl+Z as a
+    // raw byte (0x1a) rather than generating SIGTSTP, so we trigger the
+    // controller's suspend path ourselves to restore the terminal first
+    // (issue #71). On `fg`, SIGCONT re-enters the TUI and redraws.
+    if (key === '\x1a') {
+      if (this._terminal) this._terminal.suspend();
       return;
     }
 

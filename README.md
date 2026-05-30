@@ -76,6 +76,8 @@ smallcode --help
 
 If the fullscreen UI has display issues in your terminal, start with `node bin/smallcode.js --classic`.
 
+The fullscreen TUI enables raw mode, mouse tracking, and bracketed paste. SmallCode always restores your terminal on exit — including when you suspend it with `Ctrl+Z` (it cleans up before stopping, then redraws on `fg`), when it is terminated, or if it crashes. If a hard kill (`kill -9`) ever leaves your shell echoing raw escape sequences, run `reset` to restore it.
+
 ### RAG harness quick run
 
 SmallCode runs as a terminal UI harness by default:
@@ -191,6 +193,7 @@ bin/
 src/
 ├── api/index.js        Programmatic API (require('smallcode'))
 ├── tui/fullscreen.js   Fullscreen alternate-buffer TUI
+├── tui/terminal.js     Terminal lifecycle (raw mode / mouse / guaranteed restore)
 ├── plugins/loader.js   Plugin system
 ├── plugins/skills.js   Skill system
 ├── tools/              Tool routing, MCP client, validators
