@@ -243,6 +243,9 @@ Never exceeds your model's context window. Tool results capped at 4k chars, mid-
 ### 2-Stage Tool Routing
 Halves the schema context overhead. Model picks a category (read/write/search/run/plan) first, then gets only relevant tool schemas. Critical for models with 8-16k context.
 
+### Hybrid Code Search ("grep on steroids")
+The `hybrid_search` tool answers a single query with both exact matching (regex/keyword, the precision of grep) and semantic ranking (find code that *does* a thing even when it doesn't contain the query words) over a symbol-aware local index. It's fully offline with zero model downloads — it reuses SmallCode's local BM25 + hashed-vector engine, so it runs instantly on CPU with no external services. Modes: `hybrid` (default, exact + semantic), `regex`, `keyword`, `semantic`. Inspired by [colgrep](https://github.com/lightonai/next-plaid) and [semble](https://github.com/MinishLab/semble) ([#67](https://github.com/Doorman11991/smallcode/issues/67)), kept dependency-free to match SmallCode's local-first design. Tune with `SMALLCODE_HYBRID_MAX_FILES` / `SMALLCODE_HYBRID_MAX_BYTES`.
+
 ### Early-Stop Detection
 Detects repetition loops, patch spirals (stuck on corrupted file → forces rewrite), and greeting regression (model lost context → re-injects task). Saves tokens and time.
 

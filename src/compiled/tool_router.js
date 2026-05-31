@@ -230,13 +230,13 @@ function classifyToolCategory(message) {
 function getToolsForCategory(category) {
   switch (category) {
     case 'code_intel':
-      return ['graph_search', 'explain_symbol', 'read_file', 'find_files', 'search'];
+      return ['graph_search', 'explain_symbol', 'read_file', 'find_files', 'search', 'hybrid_search'];
     case 'read':
       return ['read_file', 'list_projects', 'graph_search', 'find_files', 'find_and_read'];
     case 'write':
       return ['read_file', 'write_file', 'patch', 'bash', 'read_and_patch', 'create_and_run'];
     case 'search':
-      return ['search', 'find_files', 'graph_search', 'read_file', 'explain_symbol', 'search_and_read'];
+      return ['search', 'find_files', 'graph_search', 'read_file', 'explain_symbol', 'search_and_read', 'hybrid_search'];
     case 'run':
       return ['bash', 'run', 'read_file'];
     case 'plan':

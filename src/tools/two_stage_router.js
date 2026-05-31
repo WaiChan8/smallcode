@@ -21,7 +21,7 @@ const TOOL_CATEGORIES = {
   },
   search: {
     description: 'Search code by regex, search code graph, explain symbols',
-    tools: ['search', 'search_and_read', 'graph_search', 'explain_symbol', 'list_projects'],
+    tools: ['search', 'search_and_read', 'graph_search', 'explain_symbol', 'list_projects', 'hybrid_search'],
   },
   run: {
     description: 'Run shell commands, execute scripts',

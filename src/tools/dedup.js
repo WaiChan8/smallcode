@@ -27,6 +27,7 @@ const PURE_TOOLS = new Set([
   'list_files',
   'search',
   'grep',
+  'hybrid_search',
   'graph_search',
   'explain_symbol',
   'find_by_path',

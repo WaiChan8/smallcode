@@ -439,6 +439,25 @@ async function executeTool(name, args, ctx) {
       } catch { return { result: 'No matches found.' }; }
     }
 
+    case 'hybrid_search': {
+      // "grep on steroids" (issue #67): one call fuses exact regex/keyword
+      // matching with semantic ranking over a symbol-aware local index.
+      try {
+        const q = String(args.query || args.pattern || '').trim();
+        if (!q) return { error: 'hybrid_search: query is required' };
+        const safePath = args.path ? safeResolvePath(args.path, cwd) : { ok: true, fullPath: cwd };
+        if (!safePath.ok) return { error: `hybrid_search rejected: ${safePath.reason}` };
+        const allowedModes = new Set(['hybrid', 'regex', 'keyword', 'semantic']);
+        const mode = allowedModes.has(args.mode) ? args.mode : 'hybrid';
+        const limit = Math.max(1, Math.min(parseInt(args.limit, 10) || 10, 30));
+        const { hybridSearch, formatResults } = require('../src/tools/hybrid_search');
+        const results = hybridSearch(q, { root: safePath.fullPath || cwd, mode, limit });
+        return { result: sanitizeToolOutput(formatResults(results, q, mode)).slice(0, 4000) };
+      } catch (e) {
+        return { result: `hybrid_search failed: ${e.message}` };
+      }
+    }
+
     case 'find_files': {
       try {
         // Smart listing (Feature #17): if no glob pattern, use scored file tree

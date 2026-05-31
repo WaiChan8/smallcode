@@ -1,5 +1,31 @@
 # Changelog
 
+## [Unreleased]
+
+### feat: hybrid code search — exact + semantic in one call (#67)
+
+Adds a `hybrid_search` tool ("grep on steroids") that fuses exact matching
+(regex/keyword) with semantic ranking over a symbol-aware local index, in a
+single call. It surfaces code that *does* what you describe even when it
+doesn't contain the query words, and ranks plain grep-style hits by relevance.
+
+- New module `src/tools/hybrid_search.js`: walks source files (honoring the
+  shared ignore list), splits them into symbol-centered chunks (lightweight
+  AST-ish boundary detection across JS/TS/Python/Go/Rust/Java/etc.), and scores
+  each chunk with BM25 + a hashed bag-of-words vector, boosting exact matches.
+- Modes: `hybrid` (default), `regex`, `keyword`, `semantic`.
+- Fully local and dependency-free — reuses the existing `src/rag/index_store`
+  scoring engine, so there are no model downloads, no native runtime, and no
+  external services. Inspired by the projects suggested in #67 (colgrep,
+  semble) but kept zero-dependency to match SmallCode's local-first design.
+- Wired into the executor, tool schemas, the search/code-intel routing
+  categories, and tool-call dedup. Path arguments are contained to the project
+  via `safeResolvePath`.
+- Tunables: `SMALLCODE_HYBRID_MAX_FILES` (default 1500),
+  `SMALLCODE_HYBRID_MAX_BYTES` (default 512KiB).
+- Test coverage: `test/hybrid_search.test.js` (11 cases). Full suite: 313
+  passing.
+
 ## [1.5.2] - 2026-05-30
 
 ### fix: restore terminal on suspend, termination, and crashes (#71)
